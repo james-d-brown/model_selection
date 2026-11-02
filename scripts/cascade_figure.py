@@ -8,7 +8,6 @@ The layout is set by hand so that labels and lines do not overlap.
 import sys
 from pathlib import Path
 
-W, H = 1450, 840
 FONT = "Helvetica, Arial, sans-serif"
 C = {"box": "#f4f6f8", "start": "#e6eef7", "trial": "#fde8e8", "check": "#fff6e0", "acc": "#e7f4ea",
      "line": "#4f5b63", "esc": "#b03a3a", "frame": "#9aa7b0"}
@@ -41,7 +40,8 @@ def left(b): return (b[0] - b[2] / 2, b[1])
 def right(b): return (b[0] + b[2] / 2, b[1])
 
 CW = 440
-GAP = 45
+GAP = 110  # wide enough for the escalation labels between the tiers
+W, H = 40 + 3 * CW + 2 * GAP, 840
 cols = {"lin": 20 + CW / 2, "non": 20 + CW + GAP + CW / 2, "ff": 20 + 2 * (CW + GAP) + CW / 2}  # column frame width
 rows = {"start": 92, "score": 170, "best": 240, "c1": 315, "test": 405, "res": 520}
 BW, BH, BH3 = 230, 44, 60
@@ -125,17 +125,21 @@ out.append(f'<path d="M {min(xs)},{bus_y} L {max(xs)},{bus_y}" stroke="{C["line"
 path([(end[0], bus_y), top(end)])
 
 # escalation arrows (red): out of the right side, along a gutter, into the next tier
-def escalate(src, dst, gx, y_in, lab, entry):
-    """Red arrow from src to dst; lab at the source, entry (restart or continue) where it enters dst."""
+def escalate(src, dst, edge, gx, y_in, lab, entry, entry_below=False):
+    """Red arrow from src to dst. lab sits above the line just outside the
+    source tier's frame (edge); entry (restart or continue) sits just inside
+    the destination tier's frame, above the incoming line, or below it, clear
+    of the arrowhead."""
     sb = src; db = dst
     path([right(sb), (gx, sb[1]), (gx, y_in), (db[0] - db[2] / 2, y_in)], color="esc")
-    label(right(sb)[0] + 8, sb[1] - 7, lab, color="esc")
-    label(db[0] - db[2] / 2 - 6, y_in - 4, entry, color="esc", anchor="end")
+    label(edge + 6, sb[1] - 6, lab, color="esc")
+    label(edge + GAP + 8, y_in + 14 if entry_below else y_in - 6, entry, color="esc")
 edge1 = L + CW / 2
-escalate(boxes["lin", "c1"], boxes["non", "start"], edge1 + GAP / 3, rows["start"] - 8, "no", "restart")
-escalate(boxes["lin", "c2"], boxes["non", "start"], edge1 + 2 * GAP / 3, rows["start"] + 8, "yes", "continue")
+escalate(boxes["lin", "c1"], boxes["non", "start"], edge1, edge1 + GAP / 3, rows["start"] - 14, "no", "restart")
+escalate(boxes["lin", "c2"], boxes["non", "start"], edge1, edge1 + 2 * GAP / 3, rows["start"] + 14, "yes",
+         "continue", entry_below=True)
 edge2 = N + CW / 2
-escalate(boxes["non", "c3"], boxes["ff", "cal"], edge2 + GAP / 2, FF["cal"], "yes", "continue")
+escalate(boxes["non", "c3"], boxes["ff", "cal"], edge2, edge2 + GAP / 2, FF["cal"], "yes", "continue")
 
 svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
        f'aria-label="Flow of the cascade across the three tiers">'
