@@ -99,3 +99,29 @@ def test_the_equivalence_margin_is_on_the_r2_scale_in_every_tier():
     for measure in ("linear", "nonlinear", "cmi"):
         assert equivalence_margin(SelectionConfig(measure=measure)) == 0.02
         assert equivalence_margin(SelectionConfig(measure=measure, meaningful_r2=0.1)) == 0.1
+
+
+def test_after_an_escalation_each_formulation_is_compared_with_the_tier_that_accepted_it():
+    """A selection combining steps of two tiers compares each formulation with
+    the test and sample of the tier that accepted it, not the committed tier's."""
+    from model_selection.selection import Tier
+    from model_selection.selection.equivalence import equally_supported_sets
+    from model_selection.selection.greedy import SelectionResult, SelectionStep
+    from tests.selection.test_greedy import StubTest
+    rng = np.random.default_rng(0)
+    big = SelectionSample({nm: rng.normal(size=60) for nm in "abc"}, rng.normal(size=60), np.arange(60), 0)
+    small = SelectionSample({nm: rng.normal(size=12) for nm in "abc"}, rng.normal(size=12), np.arange(12), 0)
+    t1 = Tier("t1", StubTest({"a": 0.5, "b": 0.5, "c": 0.0}), 0.02)
+    t2 = Tier("t2", StubTest({"a": 0.5, "b": 0.5, "c": 0.0}), 0.02)
+    step = lambda nm, tier: SelectionStep(formulation=nm, association=0.5, p_value=0.001, accepted=True,
+                                          n_selected_before=0, n_candidates_tested=3, dependence_lag=0, tier=tier,
+                                          effective_sample_size=60.0)
+    sel = SelectionResult(selected=["a", "b"], trajectory=[step("a", "t1"), step("b", "t1")])
+    records = information_equivalence(sel, small, t2, 99, 0.05, np.random.default_rng(1), 0.02,
+                                      {"t1": (t1, big), "t2": (t2, small)})
+    assert [r["tier"] for r in records] == ["t1", "t1"]
+    assert t1.test.calls and not t2.test.calls
+    assert all(shape[0] == 60 for _, shape in t1.test.calls if shape is not None)
+    equally_supported_sets(sel, records, small, t2, 99, 0.05, np.random.default_rng(2), 0.02,
+                           {"t1": (t1, big), "t2": (t2, small)})
+    assert not t2.test.calls

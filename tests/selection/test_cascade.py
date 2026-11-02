@@ -302,3 +302,43 @@ def test_a_powerless_escalated_tier_is_flagged_when_its_detectable_r2_is_reporte
                                       zero_flow_flag=False, min_temporal_lag=1, committed_tier="cmi",
                                       attempted_tiers=attempts))
     assert "escalated_tier_undetectable" in [f["code"] for f in flags]
+
+
+def test_the_powerless_escalated_tier_flag_uses_the_margin():
+    from model_selection.pipeline.results import PooledResult, review_flags
+    from model_selection.selection.greedy import SelectionResult, SelectionStep
+
+    def flagged(detectable, meaningful=None):
+        step = SelectionStep(formulation="c", association=0.1, p_value=0.5, accepted=False, n_selected_before=0,
+                             n_candidates_tested=2, dependence_lag=1, detectable_r2=detectable, tier="cmi")
+        result = PooledResult(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade",
+                              selection=SelectionResult(trajectory=[step]), zero_flow_fraction={},
+                              zero_flow_flag=False, min_temporal_lag=1, committed_tier="cmi", meaningful_r2=meaningful,
+                              attempted_tiers=[{"tier": "nonlinear", "committed": False, "reason": "x", "run": True},
+                                               {"tier": "cmi", "committed": True, "reason": "y", "run": True}])
+        return "escalated_tier_undetectable" in [f["code"] for f in review_flags(result)]
+    assert flagged(0.99) and flagged(0.05) and not flagged(0.015)
+    assert not flagged(0.05, meaningful=0.1)
+
+
+def test_the_powerless_escalated_tier_flag_looks_at_the_stopping_round():
+    """A first round that accepted is not flagged for its own low power; the
+    round at which the tier stopped is what the flag judges."""
+    from model_selection.pipeline.results import PooledResult, review_flags
+    from model_selection.selection.greedy import SelectionResult, SelectionStep
+
+    def step(accepted, detectable):
+        return SelectionStep(formulation="c", association=0.1, p_value=0.01 if accepted else 0.5, accepted=accepted,
+                             n_selected_before=0, n_candidates_tested=2, dependence_lag=1, detectable_r2=detectable,
+                             tier="nonlinear")
+
+    def flagged(trajectory):
+        result = PooledResult(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade",
+                              selection=SelectionResult(trajectory=trajectory), zero_flow_fraction={},
+                              zero_flow_flag=False, min_temporal_lag=1, committed_tier="nonlinear",
+                              attempted_tiers=[{"tier": "linear", "committed": False, "reason": "x", "run": True},
+                                               {"tier": "nonlinear", "committed": True, "reason": "y", "run": True}])
+        return "escalated_tier_undetectable" in [f["code"] for f in review_flags(result)]
+    assert not flagged([step(True, 0.75), step(False, 0.015)])
+    assert flagged([step(True, 0.75), step(False, 0.19)])
+    assert not flagged([step(True, 0.75)])

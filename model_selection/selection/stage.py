@@ -52,7 +52,8 @@ def run_selection_stage(
                                       min_samples_per_dimension=selection.min_samples_per_dimension)
         logger.info(f"[+] Completed tiered selection ({label}): committed tier {tiered.committed_tier}")
         committed = next(t for t in tiers if t.name == tiered.committed_tier)
-        _compare_alternatives(tiered.selection, committed.sample or sample, committed, selection, rng)
+        _compare_alternatives(tiered.selection, committed.sample or sample, committed, selection, rng,
+                              {t.name: (t, t.sample or sample) for t in tiers})
         return SelectionOutcome(tiered.selection, committed, tiered.committed_tier,
                                 [a.to_record() for a in tiered.attempted_tiers])
 
@@ -76,18 +77,20 @@ def equivalence_margin(selection: SelectionConfig) -> float:
 
 
 def _compare_alternatives(result: SelectionResult, sample: SelectionSample, tier: Tier, selection: SelectionConfig,
-                          rng: np.random.Generator) -> None:
+                          rng: np.random.Generator, tiers: dict | None = None) -> None:
     """Information equivalence of each selected formulation with the other
     candidates (selection.equivalence), from an independent random stream so
-    that later steps' draws are unchanged."""
+    that later steps' draws are unchanged. In cascade mode, tiers holds every
+    tier with its sample, and each formulation is compared with the tier that
+    accepted it."""
     if selection.equivalence_checks and any(st.accepted for st in result.trajectory):
         stream = rng.spawn(1)[0]
         margin = equivalence_margin(selection)
         result.equivalence = information_equivalence(result, sample, tier, selection.resolved_n_permutations,
-                                                     selection.alpha, stream, margin)
+                                                     selection.alpha, stream, margin, tiers)
         result.equivalent_sets = equally_supported_sets(result, result.equivalence, sample, tier,
                                                         selection.resolved_n_permutations, selection.alpha, stream,
-                                                        margin)
+                                                        margin, tiers)
         result.equivalent_sets_summary = summarize_sets(result, result.equivalence, result.equivalent_sets, margin,
                                                         selection.alpha)
         logger.info(f"[i] {result.equivalent_sets_summary}")

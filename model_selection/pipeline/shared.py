@@ -154,3 +154,39 @@ def adequacy_plot_factory(output: OutputConfig, gage: str, pathway: str,
         return make_adequacy_plot_func(test_kind, tier_label, output.output_dir, gage, pathway, feature_names)
 
     return _factory
+
+
+def pearson_with_observations(obs: np.ndarray, formulations: dict[str, np.ndarray],
+                              mask: np.ndarray | None = None) -> dict[str, float]:
+    """Pearson correlation of each formulation's flow with the observed flow,
+    at the time steps in mask where every series has a value. Reported for
+    comparison with an evaluation that scores each formulation on its own;
+    selection does not use it."""
+    obs = np.asarray(obs, dtype=float)
+    keep = np.isfinite(obs) if mask is None else (np.asarray(mask, dtype=bool) & np.isfinite(obs))
+    for values in formulations.values():
+        keep &= np.isfinite(np.asarray(values, dtype=float))
+    out = {}
+    for name, values in formulations.items():
+        x, y = np.asarray(values, dtype=float)[keep], obs[keep]
+        out[name] = float(np.corrcoef(x, y)[0, 1]) if keep.sum() > 2 and x.std() > 0 and y.std() > 0 else float("nan")
+    return out
+
+
+def log_pearson(gage: str, pathway: str, what: str, r: dict[str, float],
+                r_transformed: dict[str, float] | None = None) -> None:
+    """Log each formulation's Pearson correlation with the observations,
+    ranked largest first: on the raw flow and, when given, on the series as
+    transformed for selection (pearson_with_observations)."""
+    def ranked(d):
+        order = sorted(d.items(), key=lambda kv: (-np.nan_to_num(kv[1], nan=-np.inf), kv[0]))
+        return ", ".join(f"{k} {v:.3f}" for k, v in order)
+    if not r:
+        return
+    text = (f"[i] {gage} {pathway}: each formulation on its own, as a traditional evaluation would rank them. "
+            f"Pearson correlation with the observations on the raw flow ({what}): {ranked(r)}.")
+    if r_transformed:
+        text += (" Pearson correlation on the series as transformed for selection (log flow less its calendar-day "
+                 f"mean, as normal scores, at the same time steps): {ranked(r_transformed)}.")
+    text += " Selection instead asks what each formulation adds beyond those already selected."
+    logger.info(text)

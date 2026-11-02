@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from model_selection.io.basin import OBS_KEY
 from model_selection.event_detection.windows import ExpandedEvent
 from model_selection.selection.greedy import SelectionResult
-from model_selection.statistics.power import describe_detectable, format_share, reported_as_one
+from model_selection.selection.config import DEFAULT_ADEQUACY_FLOOR
+from model_selection.statistics.power import describe_detectable, format_share
 from model_selection.statistics.significance.block_length import (
     MIN_ACF_N, MIN_BLOCKS, expected_variance_shortfall,
 )
@@ -39,6 +40,12 @@ class PooledResult:
     seed: int | None = None
     meaningful_r2: float | None = None
     cmi_calibration: bool = True
+    pearson_correlation: dict = field(default_factory=dict)
+    """Each formulation's Pearson correlation with the observed flow at every
+    complete time step; reported only, for comparison."""
+    pearson_correlation_transformed: dict = field(default_factory=dict)
+    """The same correlation on the series as transformed for selection (log
+    flow less its calendar-day mean, as normal scores)."""
 
 
 @dataclass
@@ -90,6 +97,9 @@ class HighFlowResult:
     adequacy_floor: float | None = None
     seed: int | None = None
     cmi_calibration: bool = True
+    pearson_correlation: dict = field(default_factory=dict)
+    """Each formulation's Pearson correlation with the observed flow at the
+    time steps inside the high-flow events; reported only, for comparison."""
 
 
 @dataclass
@@ -208,17 +218,20 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
     selected_encompassed : a candidate encompasses a selected formulation:
         given the formulations selected before it, the candidate adds
         information beyond the selected formulation and the selected
-        formulation adds none beyond the candidate (docs/methods.md,
-        Interchangeable formulations).
+        formulation adds no contribution of practical size beyond the
+        candidate, either not significant or below the acceptance floor
+        (docs/methods.md, Interchangeable formulations).
     escalation_unsupported : an escalation leads to the CMI tier, which is
         not calibrated on its sample, so it was not run: after a power-only
         escalation the current tier's selection stands, possibly incomplete;
         after a validity escalation no selection is reported
         (docs/methods.md, Selection).
     escalated_tier_undetectable : the committed tier was reached by
-        escalation, and its first round could detect almost no contribution
-        (smallest detectable R^2 reported as 1): its outcome reflects too few
-        samples, not an absence of information.
+        escalation, and the round at which it stopped (not accepting its best
+        candidate) could not detect a contribution as large as the margin
+        (meaningful-effect threshold, else the acceptance floor) with 80%
+        power: the stop reflects too few samples, not an absence of
+        information.
 
     The resampling flags (few_blocks, crossfit_buffer_dropped,
     dependent_samples_permuted, dependence_not_decaying) are raised for every
@@ -254,13 +267,19 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
             for cmp in rec["comparisons"]:
                 if (cmp["relation"] == "encompasses_selected"
                         and cmp["candidate_adds_beyond_selected"]["p_value"] < rec["flag_level"]):
+                    fwd, rev = cmp["candidate_adds_beyond_selected"], cmp["selected_adds_beyond_candidate"]
+                    alpha, floor = rec.get("alpha", 0.05), rec.get("effect_size_floor")
+                    if rev["p_value"] >= alpha or floor is None:
+                        why = f"not significant (p={rev['p_value']:.3g})"
+                    else:
+                        why = (f"significant (p={rev['p_value']:.3g}), but its estimated size "
+                               f"({rev.get('effect', float('nan')):.3g}) is below the acceptance floor ({floor:.3g})")
                     flags.append({"code": "selected_encompassed", "message": (
                         f"round {rec['round']}: '{cmp['candidate']}' adds information beyond the selected "
-                        f"'{rec['selected']}' (p={cmp['candidate_adds_beyond_selected']['p_value']:.3g}), and "
-                        f"'{rec['selected']}' adds none beyond it (p="
-                        f"{cmp['selected_adds_beyond_candidate']['p_value']:.3g}), significant at "
-                        f"{rec['flag_level']:.3g} (Bonferroni across the round's comparisons): the candidate may be "
-                        "the better choice at that round.")})
+                        f"'{rec['selected']}' (p={fwd['p_value']:.3g}, effect {fwd.get('effect', float('nan')):.3g}; significant at "
+                        f"{rec['flag_level']:.3g}, Bonferroni across the round's comparisons), and "
+                        f"'{rec['selected']}' adds no contribution of practical size beyond it: {why}. The candidate "
+                        "may be the better choice at that round.")})
     attempts = getattr(result, "attempted_tiers", None) or []
     provisional = "; ".join(f"{a['tier']} tier: {a['provisional_selection']}" for a in attempts
                             if a.get("provisional_selection")) or "none"
@@ -270,13 +289,19 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
                      f" Selections made before the assumptions were rejected, for information only: {provisional}.")
             flags.append({"code": "escalation_unsupported", "message": f"{attempt['reason']}.{extra}"})
     own_steps = [st for st in (sel.trajectory if sel is not None else []) if st.tier in (None, tier)]
-    if (len(attempts) > 1 and attempts[-1].get("run", True) and own_steps
-            and own_steps[0].detectable_r2 is not None and reported_as_one(own_steps[0].detectable_r2)):
+    margin = (result.meaningful_r2 if result.meaningful_r2 is not None
+              else sel.equivalence[0].get("margin") if sel is not None and sel.equivalence and sel.equivalence[0].get("margin")
+              else getattr(result, "adequacy_floor", None) or DEFAULT_ADEQUACY_FLOOR)
+    stop = own_steps[-1] if own_steps and not own_steps[-1].accepted else None
+    if (len(attempts) > 1 and attempts[-1].get("run", True) and stop is not None
+            and stop.detectable_r2 is not None and stop.detectable_r2 > margin):
         flags.append({"code": "escalated_tier_undetectable", "message": (
-            f"the {tier} tier, reached by escalation, could detect almost no contribution in its first round on "
-            f"its sample (smallest detectable R^2 = {format_share(own_steps[0].detectable_r2)}): its outcome "
-            f"reflects too few samples, not an absence of information. Selections discarded by a validity "
-            f"escalation, for information only: {provisional}.")})
+            f"selection stopped in the {tier} tier, reached by escalation, at a round that could not detect a "
+            f"contribution of the size that matters on its sample: its smallest detectable R^2 is "
+            f"{format_share(stop.detectable_r2)}, above the margin of {format_share(margin)} (the meaningful-effect "
+            f"threshold when set, otherwise the acceptance floor). The stop then reflects too few samples, not an "
+            f"absence of information. Selections discarded by a validity escalation, for information only: "
+            f"{provisional}.")})
     if sel is not None:
         for i, step in enumerate(sel.trajectory, start=1):
             if step.low_samples_per_dimension:
@@ -360,7 +385,7 @@ def _review_header(result) -> dict:
 
 
 def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> dict:
-    keys = ("selected", "trajectory", "unconditional_association", "stopped_reason", "ill_posed",
+    keys = ("selected", "trajectory", "unconditional_association", "unconditional_effect", "stopped_reason", "ill_posed",
             "ill_posed_reason", "equivalence", "equivalent_sets", "equivalent_sets_summary", "escalated_from")
     if sel is None:
         return {k: None for k in keys}
@@ -394,6 +419,7 @@ def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> di
             for st in sel.trajectory
         ],
         "unconditional_association": sel.unconditional_association,
+        "unconditional_effect": sel.unconditional_effect,
         "stopped_reason": sel.stopped_reason,
         "ill_posed": sel.ill_posed,
         "ill_posed_reason": sel.ill_posed_reason,
@@ -415,6 +441,8 @@ def pooled_result_to_dict(result: PooledResult) -> dict:
         "missing_values": result.missing_values,
         "zero_flow_fraction": result.zero_flow_fraction,
         "zero_flow_flag": result.zero_flow_flag,
+        "pearson_correlation": result.pearson_correlation,
+        "pearson_correlation_transformed": result.pearson_correlation_transformed,
         "min_temporal_lag": result.min_temporal_lag,
         "measure": result.measure,
         "dependence_aware_subsampling_used": result.dependence_aware_subsampling_used,
@@ -462,6 +490,7 @@ def high_flow_result_to_dict(result: HighFlowResult) -> dict:
         "gage": result.gage,
         "n_timesteps": result.n_timesteps,
         "missing_values": result.missing_values,
+        "pearson_correlation": result.pearson_correlation,
         "zero_flow_fraction": result.zero_flow_fraction,
         "zero_flow_flag": result.zero_flow_flag,
         "min_temporal_lag": result.min_temporal_lag,

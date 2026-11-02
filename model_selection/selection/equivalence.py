@@ -13,8 +13,10 @@ distribution that has several Markov boundaries (Statnikov et al., 2013).
 
 For each accepted round, with Z the conditioning set before the winner W,
 every other candidate C not already selected is compared with W in both
-directions, with the committed tier's test and acceptance gates, each at
-level alpha:
+directions, with the test and acceptance gates of the tier that accepted W,
+on that tier's sample, each at level alpha. After a power-only escalation a
+selection combines steps of two tiers, and the tier that accepted W remains
+valid for it:
 
     C adds beyond W:  is C informative about O given Z and W?
     W adds beyond C:  is W informative about O given Z and C?
@@ -112,6 +114,40 @@ def _adds(tier: Tier, name: str, values, obs, z, n_permutations, rng, time_posit
             "detectable_r2": _detectable(n_eff, obs, values, z, alpha)}
 
 
+TierContexts = dict[str, tuple[Tier, SelectionSample]]
+"""Each tier of a cascade, by name, with the sample its tests use."""
+
+
+class _Context:
+    """The test and sample of the tier that made an acceptance. After a
+    power-only escalation a selection combines steps of two tiers; each is
+    compared with the tier that accepted it, which remains valid for it
+    (docs/methods.md, Interchangeable formulations)."""
+
+    def __init__(self, tier: Tier, sample: SelectionSample):
+        self.tier, self.sample = tier, sample
+        self.candidates, self.obs = sample.candidates, sample.obs
+        n = len(sample.obs)
+        self.n = n
+        self.time_positions = sample.time_positions if sample.time_positions is not None else np.arange(n)
+        self.lag, self.grid_step = sample.dependence_lag, sample.grid_step
+
+    def z(self, names: list[str]):
+        return _stack_selected(self.candidates, names, self.sample.covariates)
+
+    def adds(self, name, values, z, n_permutations, rng, alpha, n_eff) -> dict:
+        return _adds(self.tier, name, values, self.obs, z, n_permutations, rng, self.time_positions, self.lag,
+                     self.grid_step, alpha, n_eff)
+
+
+def _contexts(sample: SelectionSample, tier: Tier, tiers: TierContexts | None):
+    """(context of a step's tier, rank of a tier name in generality)."""
+    default = _Context(tier, sample)
+    built = {name: _Context(t, s) for name, (t, s) in (tiers or {}).items()}
+    order = {name: i for i, name in enumerate(tiers or {})}
+    return (lambda name: built.get(name, default)), (lambda name: order.get(name, -1))
+
+
 def information_equivalence(
         selection: SelectionResult,
         sample: SelectionSample,
@@ -120,6 +156,7 @@ def information_equivalence(
         alpha: float,
         rng: np.random.Generator,
         margin: float,
+        tiers: TierContexts | None = None,
 ) -> list[dict]:
     """For every accepted round, the relation of its winner to each other
     candidate not selected before it (see the module docstring). Returns one
@@ -127,30 +164,29 @@ def information_equivalence(
     "candidate", "relation", "candidate_adds_beyond_selected": {p_value,
     effect, adds, detectable_r2}, "selected_adds_beyond_candidate": {...}}],
     "flag_level"}. margin: the contribution an equivalence must be able to
-    detect (see the module docstring)."""
-    candidates, obs = sample.candidates, sample.obs
-    n = len(obs)
-    time_positions = sample.time_positions if sample.time_positions is not None else np.arange(n)
-    lag, grid_step = sample.dependence_lag, sample.grid_step
+    detect (see the module docstring). tiers: every tier of a cascade with
+    its sample; each round is then compared with the tier that accepted it,
+    otherwise with `tier` on `sample`."""
+    context_of, _ = _contexts(sample, tier, tiers)
     records = []
     for i, step in enumerate(selection.trajectory):
         if not step.accepted:
             continue
+        ctx = context_of(step.tier)
+        candidates = ctx.candidates
         before = selection.selected[:i]
         winner = step.formulation
         others = [c for c in candidates if c != winner and c not in before]
         if not others:
             continue
-        z = _stack_selected(candidates, before, sample.covariates)
-        n_eff = step.effective_sample_size or n
-        z_with_winner = _stack_selected(candidates, before + [winner], sample.covariates)
+        z = ctx.z(before)
+        n_eff = step.effective_sample_size or ctx.n
+        z_with_winner = ctx.z(before + [winner])
         comparisons = []
         for c in others:
-            forward = _adds(tier, c, candidates[c], obs, z_with_winner, n_permutations, rng, time_positions, lag,
-                            grid_step, alpha, n_eff)
+            forward = ctx.adds(c, candidates[c], z_with_winner, n_permutations, rng, alpha, n_eff)
             z_with_c = as2d(candidates[c]) if z is None else np.hstack([z, as2d(candidates[c])])
-            reverse = _adds(tier, winner, candidates[winner], obs, z_with_c, n_permutations, rng, time_positions,
-                            lag, grid_step, alpha, n_eff)
+            reverse = ctx.adds(winner, candidates[winner], z_with_c, n_permutations, rng, alpha, n_eff)
             comparisons.append({
                 "candidate": c,
                 "relation": _relation(forward, reverse, margin),
@@ -158,6 +194,7 @@ def information_equivalence(
                 "selected_adds_beyond_candidate": reverse,
             })
         records.append({"round": i + 1, "selected": winner, "given": before, "margin": margin,
+                        "tier": ctx.tier.name, "alpha": alpha, "effect_size_floor": ctx.tier.effect_size_floor,
                         "flag_level": alpha / (2 * len(comparisons)), "comparisons": comparisons})
         summary = "; ".join(f"{cmp['candidate']}: {cmp['relation'].replace('_', ' ')}" for cmp in comparisons)
         logger.info(f"[i] Round {i + 1}, {winner} compared with the other candidates: {summary}.")
@@ -177,14 +214,19 @@ def equally_supported_sets(
         alpha: float,
         rng: np.random.Generator,
         margin: float,
+        tiers: TierContexts | None = None,
 ) -> list[dict]:
     """The selected set and every set obtained by replacing selected
     formulations with candidates equivalent to them or not distinguishable
     from them, each verified as a whole (see the module docstring). Returns
     [{"set", "selected", "supported", "equivalent", "selected_adds_beyond_set":
     {p_value, effect, adds, detectable_r2} or None, "members": {name: {...}}}],
-    the selected set first."""
-    selected = [st.formulation for st in selection.trajectory if st.accepted]
+    the selected set first. With tiers (see information_equivalence), each
+    member is tested with the tier that accepted the formulation in its
+    position, and the replaced formulations jointly with the most general of
+    their tiers."""
+    steps = [st for st in selection.trajectory if st.accepted]
+    selected = [st.formulation for st in steps]
     if not selected:
         return []
     options = [[w] for w in selected]
@@ -195,28 +237,28 @@ def equally_supported_sets(
             if c["relation"] in ("equivalent", "not_distinguishable"):
                 options[i].append(c["candidate"])
                 relation_of[(rec["selected"], c["candidate"])] = c["relation"]
-    candidates, obs = sample.candidates, sample.obs
-    n = len(obs)
-    time_positions = sample.time_positions if sample.time_positions is not None else np.arange(n)
-    lag, grid_step = sample.dependence_lag, sample.grid_step
-    n_eff = min((st.effective_sample_size or n) for st in selection.trajectory if st.accepted)
+    context_of, rank = _contexts(sample, tier, tiers)
     seen, out = set(), []
     for combo in itertools.product(*options):
         if len(set(combo)) < len(combo) or frozenset(combo) in seen:
             continue
         seen.add(frozenset(combo))
         members = list(combo)
-        z_set = _stack_selected(candidates, members, sample.covariates)
-        missing = [w for w in selected if w not in members]
+        missing_slots = [i for i, w in enumerate(selected) if w not in members]
+        missing = [selected[i] for i in missing_slots]
         beyond = None
         if missing:
-            beyond = _adds(tier, "+".join(missing), _stack(candidates, missing), obs, z_set, n_permutations, rng,
-                           time_positions, lag, grid_step, alpha, n_eff)
+            general = max((steps[i].tier for i in missing_slots), key=rank)
+            ctx = context_of(general)
+            n_eff = min((steps[i].effective_sample_size or ctx.n) for i in missing_slots if steps[i].tier == general)
+            beyond = ctx.adds("+".join(missing), _stack(ctx.candidates, missing), ctx.z(members), n_permutations,
+                              rng, alpha, n_eff)
         member_tests = {}
-        for m in members:
-            z_rest = _stack_selected(candidates, [o for o in members if o != m], sample.covariates)
-            member_tests[m] = _adds(tier, m, candidates[m], obs, z_rest, n_permutations, rng, time_positions, lag,
-                                    grid_step, alpha, n_eff)
+        for slot, m in enumerate(members):
+            ctx = context_of(steps[slot].tier)
+            n_eff = steps[slot].effective_sample_size or ctx.n
+            member_tests[m] = ctx.adds(m, ctx.candidates[m], ctx.z([o for o in members if o != m]), n_permutations,
+                                       rng, alpha, n_eff)
         supported = (beyond is None or not beyond["adds"]) and all(t["adds"] for t in member_tests.values())
         swaps = [relation_of[(w, c)] for w, c in zip(selected, members) if w != c]
         equivalent = bool(supported and all(r == "equivalent" for r in swaps)
@@ -256,10 +298,8 @@ def summarize_sets(selection: SelectionResult, comparisons: list[dict], sets: li
         parts.append("Replaceable: " + "; ".join(swaps) + ".")
     for rec in comparisons:
         w = rec["selected"]
-        others = {c["candidate"] for v, cs in replaceable.items() if v != w for c in cs} | set(selected)
         # The selected formulation adds information beyond these, so none of them can replace it.
-        worse = [c for c in rec["comparisons"]
-                 if c["relation"] in ("encompassed_by_selected", "distinct") and c["candidate"] not in others]
+        worse = [c for c in rec["comparisons"] if c["relation"] in ("encompassed_by_selected", "distinct")]
         better = [c["candidate"] for c in rec["comparisons"] if c["relation"] == "encompasses_selected"]
         if not replaceable[w] and worse:
             p_max = max(c["selected_adds_beyond_candidate"]["p_value"] for c in worse)

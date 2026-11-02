@@ -49,6 +49,14 @@ def test_pipeline_runs_end_to_end_and_selects_informative_formulation():
     assert "formulation_informative" in result.pooled.selection.selected
     assert "formulation_noise" not in result.pooled.selection.selected
     assert result.high_flow is not None
+    for pathway in (result.pooled, result.high_flow):
+        r = pathway.pearson_correlation
+        assert set(r) == {"formulation_informative", "formulation_noise"}
+        assert r["formulation_informative"] > r["formulation_noise"]
+        e = pathway.selection.unconditional_effect
+        assert set(e) == set(r) and e["formulation_informative"] > e["formulation_noise"]
+    t = result.pooled.pearson_correlation_transformed
+    assert set(t) == set(result.pooled.pearson_correlation) and t["formulation_informative"] > t["formulation_noise"]
     json.dumps(basin_result_to_dict(result))
 
 

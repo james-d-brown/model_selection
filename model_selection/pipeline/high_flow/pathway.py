@@ -59,8 +59,8 @@ from model_selection.pipeline.high_flow.event_sample import (
 from model_selection.pipeline.high_flow.outputs import write_high_flow_outputs
 from model_selection.pipeline.results import HighFlowResult
 from model_selection.pipeline.shared import (
-    adequacy_plot_factory, common_basis, log_review_flags, max_decorrelation_lag, resolve_rng,
-    write_dependence_plot, zero_flow_check,
+    adequacy_plot_factory, common_basis, log_pearson, log_review_flags, max_decorrelation_lag,
+    pearson_with_observations, resolve_rng, write_dependence_plot, zero_flow_check,
 )
 from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal
 from model_selection.preprocessing.transforms import prepare_series
@@ -430,8 +430,14 @@ def run_high_flow_analysis(
                     )
                 high_flow_events = [ev for ev in expanded_events if ev.event_id in retained_event_ids]
 
+    in_events = np.zeros(len(basin.obs), dtype=bool)
+    for ev in usable_events:
+        in_events[ev.start:ev.end + 1] = True
+    pearson = (pearson_with_observations(basin.obs.values, raw_formulations, in_events)
+               if usable_events else {})
+    log_pearson(gage, "high-flow", "the time steps inside the high-flow events", pearson)
     result = HighFlowResult(
-        seed=seed, cmi_calibration=selection.cmi_calibration,
+        seed=seed, cmi_calibration=selection.cmi_calibration, pearson_correlation=pearson,
         gage=gage, n_timesteps=len(basin.obs),
         zero_flow_fraction=zero_flow, zero_flow_flag=zero_flow_flag,
         selection=result_selection, high_flow_power=power_summary,

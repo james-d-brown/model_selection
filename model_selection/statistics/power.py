@@ -133,8 +133,3 @@ def describe_detectable(r2: float, n_features: int = 1) -> dict:
         ),
     }
 
-
-def reported_as_one(r2: float) -> bool:
-    """True when format_share prints the share as 1, so a smallest detectable
-    R^2 reads as "no contribution, however large"."""
-    return format_share(r2) == "1"

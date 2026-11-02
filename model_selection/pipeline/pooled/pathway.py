@@ -37,8 +37,8 @@ from model_selection.pipeline.results import (
     pooled_result_to_dict,
 )
 from model_selection.pipeline.shared import (
-    adequacy_plot_factory, common_basis, log_review_flags, max_decorrelation_lag, resolve_rng,
-    write_dependence_plot, zero_flow_check,
+    adequacy_plot_factory, common_basis, log_pearson, log_review_flags, max_decorrelation_lag,
+    pearson_with_observations, resolve_rng, write_dependence_plot, zero_flow_check,
 )
 from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal, seasonal_phase
 from model_selection.preprocessing.transforms import prepare_series
@@ -162,6 +162,9 @@ def run_pooled_analysis(
     if used in tier_samples:
         min_temporal_lag = tier_samples[used].dependence_lag
 
+    pearson = pearson_with_observations(basin.obs.values, {k: v.values for k, v in basin.formulations.items()})
+    pearson_transformed = pearson_with_observations(obs_t[rows], {k: v[rows] for k, v in candidates_t.items()})
+    log_pearson(gage, "pooled", "every complete time step", pearson, pearson_transformed)
     result = PooledResult(
         seed=seed, meaningful_r2=selection.meaningful_r2, cmi_calibration=selection.cmi_calibration,
         gage=gage, n_timesteps=n_grid, n_complete_timesteps=n, missing_values=missing_values,
@@ -175,6 +178,8 @@ def run_pooled_analysis(
         committed_tier=outcome.committed_tier,
         adequacy_floor=adequacy.resolved_effect_size_floor(selection) if selection.measure == CASCADE else None,
         attempted_tiers=outcome.attempted_tiers,
+        pearson_correlation=pearson,
+        pearson_correlation_transformed=pearson_transformed,
         seasonal_conditioning={"enabled": seasonal.enabled,
                                   "window_days": seasonal.window_days if seasonal.enabled else None,
                                   "record_too_short": too_short is not None},

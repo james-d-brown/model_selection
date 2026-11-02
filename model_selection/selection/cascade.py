@@ -83,6 +83,7 @@ def run_tiered_selection(
     attempted: list[TierAttempt] = []
     carried: list = []
     unconditional: dict = {}
+    unconditional_effect: dict = {}
     escalated: dict | None = None
     for i, tier in enumerate(tiers):
         result = greedy_forward_selection(tier.sample or sample, tier, n_permutations=n_permutations,
@@ -91,6 +92,9 @@ def run_tiered_selection(
         if carried and not result.unconditional_association:
             result.unconditional_association = unconditional  # round 1 was tested by the tier it was made in
         unconditional = result.unconditional_association
+        if carried and not result.unconditional_effect:
+            result.unconditional_effect = unconditional_effect
+        unconditional_effect = result.unconditional_effect
         restarts = result.tier_rejected and not result.escalation_continues
         attempted.append(TierAttempt(
             tier=tier.name, committed=not result.tier_rejected,

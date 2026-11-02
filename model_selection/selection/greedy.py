@@ -106,6 +106,10 @@ class SelectionResult:
     trajectory: list[SelectionStep] = field(default_factory=list)
     stopped_reason: str = ""
     unconditional_association: dict[str, float] = field(default_factory=dict)
+    unconditional_effect: dict[str, float] = field(default_factory=dict)
+    """Every candidate's effect size in round 1, given only the sample's
+    covariates: the share of the observations' variation each formulation
+    explains on its own, on the analysis scale."""
     tier_rejected: bool = False
     tier_rejection_reason: str | None = None
     diagnostic_plot_paths: list[str] = field(default_factory=list)
@@ -222,11 +226,13 @@ def greedy_forward_selection(
     trajectory: list[SelectionStep] = list(carried_steps)
     plots: list[str] = []
     unconditional: dict[str, float] = {}
+    unconditional_effect: dict[str, float] = {}
     stopped_reason = "no candidates remaining"
 
     def finish(**kw) -> SelectionResult:
         return SelectionResult(selected=kw.pop("selected", selected), trajectory=trajectory,
                                stopped_reason=stopped_reason, unconditional_association=unconditional,
+                               unconditional_effect=unconditional_effect,
                                diagnostic_plot_paths=plots, **kw)
 
     while remaining:
@@ -258,10 +264,30 @@ def greedy_forward_selection(
                                time_positions, lag, grid_step=sample.grid_step)
         if round_no == 1:
             unconditional = {nm: float(v) for nm, v in zip(result.names, result.observed)}
-        winner = result.winner
+        # The round's winner is the candidate with the largest effect size among
+        # those whose statistic is significant against the null of the maximum
+        # (all candidates when none is). The maximum null controls false
+        # selections for whichever candidate is chosen (Westfall and Young,
+        # 1993), and a winner that is not accepted then means no remaining
+        # candidate would be. In the linear and free-form tiers the effect size
+        # is the statistic less its chance level, so the order is the
+        # statistic's; in the nonlinear tier it is a different quantity
+        # (docs/methods.md, Acceptance test).
+        null_max = result.null.max(axis=1)
+        effects = {}
+        for k, nm in enumerate(result.names):
+            effects[nm] = tier.test.magnitude(candidates[nm], obs, z, time_positions, lag,
+                                              float(result.observed[k]), result.null[:, k],
+                                              grid_step=sample.grid_step)
+        if round_no == 1:
+            unconditional_effect = {nm: float(e[0]) for nm, e in effects.items()}
+        significant = [nm for k, nm in enumerate(result.names)
+                       if permutation_p_value(float(result.observed[k]), null_max) < alpha]
+        winner = max(significant or result.names, key=lambda nm: (effects[nm][0], nm))
         w = result.index(winner)
         winner_values = candidates[winner]
-        logger.info(f"[+] Round {round_no} winner: {winner} (effect size {result.observed[w]:.4g}).")
+        logger.info(f"[+] Round {round_no} winner: {winner} (effect size {effects[winner][0]:.4g}, "
+                    f"statistic {result.observed[w]:.4g}).")
 
         round_label = (f"round{round_no}_{winner}_given_{'+'.join(selected)}" if selected
                        else f"round{round_no}_{winner}")
@@ -325,12 +351,9 @@ def greedy_forward_selection(
                                                "detectable_r2": None})
 
         null_column = result.null[:, w]
-        effect, effect_null_mean = tier.test.magnitude(winner_values, obs, z, time_positions, lag,
-                                                       float(result.observed[w]), null_column,
-                                                       grid_step=sample.grid_step)
+        effect, effect_null_mean = effects[winner]
         accepted, p_value, bias_corrected = gate(
-            float(result.observed[w]), null_column, result.null.max(axis=1), alpha, tier.effect_size_floor,
-            effect=effect)
+            float(result.observed[w]), null_column, null_max, alpha, tier.effect_size_floor, effect=effect)
         magnitude_unsubstantiated = bool(bias_corrected < tier.effect_size_floor)
         # An acceptance by the CMI tier counts only where that tier is calibrated
         # on the sample (statistics.conditional_independence.calibration).

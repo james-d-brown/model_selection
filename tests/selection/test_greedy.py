@@ -363,3 +363,31 @@ def test_escalation_to_an_uncalibrated_cmi_tier_marks_it_unsupported():
 def test_cmi_calibration_is_attached_only_when_requested():
     assert build_tier("cmi", SelectionConfig(measure="cmi", cmi_calibration=False)).calibration is None
     assert callable(build_tier("cmi", SelectionConfig(measure="cmi", cmi_calibration=True)).calibration)
+
+
+class _EffectStub(StubTest):
+    """A test whose effect size is a separate quantity from its statistic, as
+    in the nonlinear tier."""
+
+    def __init__(self, effects, sizes):
+        super().__init__(effects)
+        self.sizes = sizes
+
+    def magnitude(self, candidate, obs, conditioning, time_positions, dependence_lag, observed, null_draws,
+                  grid_step=None):
+        name = next(nm for nm, v in self._values.items() if v is candidate)
+        return self.sizes[name], None
+
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+        self._values = candidates
+        return super().run(candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag)
+
+
+def test_the_winner_is_the_significant_candidate_with_the_largest_effect_size():
+    """'a' has the larger statistic, 'b' the larger effect size; both are
+    significant, so 'b' wins. 'c' has the largest effect size but is not
+    significant, so it cannot win."""
+    sample = _sample()
+    test = _EffectStub({"a": 0.5, "b": 0.3, "c": 0.0}, {"a": 0.05, "b": 0.2, "c": 0.9})
+    res = greedy_forward_selection(sample, Tier("stub", test, 0.02), 99, max_selected=1, rng=np.random.default_rng(1))
+    assert res.trajectory[0].formulation == "b" and res.trajectory[0].accepted
