@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.idea/workspace.xml
+
+# Local run script (contains credentials) and HTML renderings of the Markdown docs
+evaluate.py
+README.html
+docs/methods.html

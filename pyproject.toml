@@ -1,0 +1,30 @@
+[project]
+name = "model_selection"
+version = "0.2.0"
+description = "Hydrologic model selection by conditional association with significance testing, over the whole record and over high-flow events"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "pyarrow",
+    "plotly",
+    "dataretrieval",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "dcor"]
+docs = ["markdown", "latex2mathml"]
+
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["model_selection*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

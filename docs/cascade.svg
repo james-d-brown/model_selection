@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1450 840" width="1450" height="840" role="img" aria-label="Flow of the cascade across the three tiers"><defs><marker id="arrow-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f5b63"/></marker><marker id="arrow-esc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b03a3a"/></marker></defs><rect width="100%" height="100%" fill="white"/><rect x="20.0" y="28" width="440" height="655" rx="14" fill="none" stroke="#9aa7b0" stroke-width="1.2"/>
+<text x="240.0" y="52" font-family="Helvetica, Arial, sans-serif" font-size="15" text-anchor="middle" fill="#1d1d1f" font-weight="bold">Linear tier</text>
+<rect x="505.0" y="28" width="440" height="655" rx="14" fill="none" stroke="#9aa7b0" stroke-width="1.2"/>
+<text x="725.0" y="52" font-family="Helvetica, Arial, sans-serif" font-size="15" text-anchor="middle" fill="#1d1d1f" font-weight="bold">Nonlinear tier</text>
+<rect x="990.0" y="28" width="440" height="655" rx="14" fill="none" stroke="#9aa7b0" stroke-width="1.2"/>
+<text x="1210.0" y="52" font-family="Helvetica, Arial, sans-serif" font-size="15" text-anchor="middle" fill="#1d1d1f" font-weight="bold">Free-form tier</text>
+<rect x="125.0" y="70.0" width="230" height="44" rx="9" fill="#e6eef7" stroke="#4f5b63" stroke-width="1.8"/>
+<text x="240.0" y="96.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="bold">Start: empty selection</text>
+<rect x="610.0" y="70.0" width="230" height="44" rx="9" fill="#fde8e8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="725.0" y="88.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">New trial: empty selection,</text>
+<text x="725.0" y="104.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">or the selection so far</text>
+<rect x="1075.0" y="70.0" width="270" height="44" rx="9" fill="#fff6e0" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1210.0" y="88.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Calibration test: is the free-form</text>
+<text x="1210.0" y="104.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">tier calibrated on the sample?</text>
+<rect x="1095.0" y="148.0" width="230" height="44" rx="9" fill="#fde8e8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1210.0" y="166.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Continue from the</text>
+<text x="1210.0" y="182.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">selection so far</text>
+<rect x="125.0" y="148.0" width="230" height="44" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="240.0" y="166.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Score each remaining</text>
+<text x="240.0" y="182.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">candidate</text>
+<rect x="125.0" y="218.0" width="230" height="44" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="240.0" y="236.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Take the highest-scoring</text>
+<text x="240.0" y="252.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">candidate</text>
+<rect x="115.0" y="375.0" width="250" height="60" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="240.0" y="393.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Acceptance test: does it add</text>
+<text x="240.0" y="409.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">significant information, at</text>
+<text x="240.0" y="425.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">least the acceptance floor?</text>
+<rect x="610.0" y="148.0" width="230" height="44" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="725.0" y="166.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Score each remaining</text>
+<text x="725.0" y="182.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">candidate</text>
+<rect x="610.0" y="218.0" width="230" height="44" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="725.0" y="236.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Take the highest-scoring</text>
+<text x="725.0" y="252.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">candidate</text>
+<rect x="600.0" y="375.0" width="250" height="60" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="725.0" y="393.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Acceptance test: does it add</text>
+<text x="725.0" y="409.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">significant information, at</text>
+<text x="725.0" y="425.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">least the acceptance floor?</text>
+<rect x="1095.0" y="218.0" width="230" height="44" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1210.0" y="236.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Score each remaining</text>
+<text x="1210.0" y="252.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">candidate</text>
+<rect x="1095.0" y="293.0" width="230" height="44" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1210.0" y="311.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Take the highest-scoring</text>
+<text x="1210.0" y="327.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">candidate</text>
+<rect x="1085.0" y="375.0" width="250" height="60" rx="9" fill="#f4f6f8" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1210.0" y="393.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Acceptance test: does it add</text>
+<text x="1210.0" y="409.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">significant information, at</text>
+<text x="1210.0" y="425.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">least the acceptance floor?</text>
+<rect x="60.0" y="490.0" width="170" height="60" rx="9" fill="#e7f4ea" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="145.0" y="508.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Add it to the</text>
+<text x="145.0" y="524.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">selection.</text>
+<text x="145.0" y="540.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Candidates left?</text>
+<rect x="545.0" y="490.0" width="170" height="60" rx="9" fill="#e7f4ea" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="630.0" y="508.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Add it to the</text>
+<text x="630.0" y="524.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">selection.</text>
+<text x="630.0" y="540.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Candidates left?</text>
+<rect x="1030.0" y="490.0" width="170" height="60" rx="9" fill="#fff6e0" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1115.0" y="508.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Calibration test: is the</text>
+<text x="1115.0" y="524.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">tier calibrated, given the</text>
+<text x="1115.0" y="540.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">current selection?</text>
+<rect x="1030.0" y="585.0" width="170" height="60" rx="9" fill="#e7f4ea" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="1115.0" y="603.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Add it to the</text>
+<text x="1115.0" y="619.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">selection.</text>
+<text x="1115.0" y="635.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Candidates left?</text>
+<rect x="85.0" y="293.0" width="310" height="44" rx="9" fill="#fff6e0" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="240.0" y="311.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Linear adjustment test: can the dependence</text>
+<text x="240.0" y="327.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">on Z and V be removed linearly?</text>
+<rect x="245.0" y="490.0" width="190" height="76" rx="9" fill="#fff6e0" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="340.0" y="508.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Each remaining candidate:</text>
+<text x="340.0" y="524.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">does it relate nonlinearly</text>
+<text x="340.0" y="540.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">to the observations, or vary</text>
+<text x="340.0" y="556.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">across states?</text>
+<rect x="730.0" y="490.0" width="190" height="76" rx="9" fill="#fff6e0" stroke="#4f5b63" stroke-width="1.2"/>
+<text x="825.0" y="508.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">Each remaining candidate:</text>
+<text x="825.0" y="524.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">does its relationship with</text>
+<text x="825.0" y="540.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">the observations vary</text>
+<text x="825.0" y="556.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="normal">across states?</text>
+<rect x="575.0" y="773.0" width="300" height="44" rx="9" fill="#e6eef7" stroke="#4f5b63" stroke-width="1.8"/>
+<text x="725.0" y="799.5" font-family="Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#1d1d1f" font-weight="bold">End: the selected formulations</text>
+<path d="M 240.0,114.0 L 240.0,148.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 240.0,192.0 L 240.0,218.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 725.0,114.0 L 725.0,148.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 725.0,192.0 L 725.0,218.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 1210.0,192.0 L 1210.0,218.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 1210.0,262.0 L 1210.0,293.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 1210.0,114.0 L 1210.0,148.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="1218.0" y="135.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">yes</text>
+<path d="M 240.0,262.0 L 240.0,293.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 240.0,337.0 L 240.0,375.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="246.0" y="359" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">yes</text>
+<path d="M 725.0,262.0 L 725.0,375.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 1210.0,337.0 L 1210.0,375.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 145.0,435.0 L 145.0,490.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="151.0" y="457.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">yes</text>
+<path d="M 340.0,435.0 L 340.0,490.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="346.0" y="457.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 630.0,435.0 L 630.0,490.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="636.0" y="457.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">yes</text>
+<path d="M 825.0,435.0 L 825.0,490.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="831.0" y="457.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 1115.0,435.0 L 1115.0,490.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="1121.0" y="457.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">yes</text>
+<path d="M 1115.0,550.0 L 1115.0,585.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="1121.0" y="572.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">yes</text>
+<path d="M 60.0,520 L 32.0,520 L 32.0,170 L 125.0,170" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="46.0" y="514" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#333" font-weight="normal">yes</text>
+<text x="45.0" y="345.0" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#333" text-anchor="middle" transform="rotate(-90 45.0 345.0)">next round</text>
+<path d="M 545.0,520 L 517.0,520 L 517.0,170 L 610.0,170" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="531.0" y="514" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#333" font-weight="normal">yes</text>
+<text x="530.0" y="345.0" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#333" text-anchor="middle" transform="rotate(-90 530.0 345.0)">next round</text>
+<path d="M 1030.0,615 L 1002.0,615 L 1002.0,240 L 1095.0,240" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<text x="1016.0" y="609" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#333" font-weight="normal">yes</text>
+<text x="1015.0" y="427.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#333" text-anchor="middle" transform="rotate(-90 1015.0 427.5)">next round</text>
+<path d="M 145.0,550.0 L 145.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="151.0" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 630.0,550.0 L 630.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="636.0" y="568.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 1115.0,645.0 L 1115.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="1121.0" y="663.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 340.0,566.0 L 340.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="346.0" y="584.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 825.0,566.0 L 825.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="831.0" y="584.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 1200.0,520 L 1230.0,520 L 1230.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="1206.0" y="513" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 1310.0,435.0 L 1310.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="1316.0" y="457.0" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 1345.0,92 L 1416.0,92 L 1416.0,725" fill="none" stroke="#4f5b63" stroke-width="1.4"/>
+<text x="1353.0" y="85" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#333" font-weight="normal">no</text>
+<path d="M 145.0,725 L 1416.0,725" stroke="#4f5b63" stroke-width="1.4"/>
+<path d="M 725.0,725 L 725.0,773.0" fill="none" stroke="#4f5b63" stroke-width="1.4" marker-end="url(#arrow-line)"/>
+<path d="M 395.0,315 L 475.0,315 L 475.0,84 L 610.0,84" fill="none" stroke="#b03a3a" stroke-width="1.4" marker-end="url(#arrow-esc)"/>
+<text x="403.0" y="308" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#b03a3a" font-weight="normal">no</text>
+<text x="604.0" y="80" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="end" fill="#b03a3a" font-weight="normal">restart</text>
+<path d="M 435.0,528 L 490.0,528 L 490.0,100 L 610.0,100" fill="none" stroke="#b03a3a" stroke-width="1.4" marker-end="url(#arrow-esc)"/>
+<text x="443.0" y="521" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#b03a3a" font-weight="normal">yes</text>
+<text x="604.0" y="96" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="end" fill="#b03a3a" font-weight="normal">continue</text>
+<path d="M 920.0,528 L 967.5,528 L 967.5,92 L 1075.0,92" fill="none" stroke="#b03a3a" stroke-width="1.4" marker-end="url(#arrow-esc)"/>
+<text x="928.0" y="521" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#b03a3a" font-weight="normal">yes</text>
+<text x="1069.0" y="88" font-family="Helvetica, Arial, sans-serif" font-size="12" text-anchor="end" fill="#b03a3a" font-weight="normal">continue</text></svg>
