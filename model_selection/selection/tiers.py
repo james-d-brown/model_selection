@@ -103,7 +103,7 @@ def partial_out_covariates(sample: SelectionSample) -> SelectionSample:
     formulations are candidates, so they are residualized too. Used by the
     high-flow linear tier, so that the registration parameters' nonlinear
     effect on the event features is removed before its least-squares
-    regressions (docs/methods.md, Linear tier, Regression). The sample's
+    regressions (docs/methods.md, Linear tier). The sample's
     own covariates are returned unchanged when there are none."""
     if sample.covariates is None or np.asarray(sample.covariates).size == 0:
         return sample
