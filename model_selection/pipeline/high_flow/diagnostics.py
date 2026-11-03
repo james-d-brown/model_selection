@@ -118,6 +118,13 @@ def basis_sensitivity_check(
             table, retained_event_ids, list(raw_formulations), n_components, config)
         parts = ([] if registration is None else [registration]) + [candidate_events[s] for s in already_selected]
         z = np.hstack(parts) if parts else None
+        if tier.name == "linear" and registration is not None:
+            # As in the selection: the linear tier removes the registration from every series first.
+            from model_selection.selection.tiers import SelectionSample, partial_out_covariates
+            residual = partial_out_covariates(SelectionSample(candidate_events, obs_features, time_positions,
+                                                              dependence_lag, covariates=registration))
+            candidate_events, obs_features = residual.candidates, residual.obs
+            z = np.hstack([candidate_events[s] for s in already_selected]) if already_selected else None
         result = tier.test.run({c: candidate_events[c] for c in remaining}, obs_features, z, n_permutations,
                                rng, time_positions, dependence_lag)
         w = result.index(result.winner)

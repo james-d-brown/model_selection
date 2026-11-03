@@ -240,10 +240,15 @@ def greedy_forward_selection(
             stopped_reason = f"reached max_selected={max_selected}"
             break
         z = _stack_selected(candidates, selected, sample.covariates)
+        # With the covariates removed from every series (partial_out_covariates), the relationship checks and
+        # their plots still condition on them, and the adjustment test's interaction part uses them.
+        partialled = sample.partialled_covariates
+        z_rel = z if partialled is None else (partialled if z is None else np.hstack([as2d(partialled), z]))
+        k_partialled = sample.partialled_df
         round_no = len(selected) + 1
 
         if tier.structural_check is not None:
-            k_dim = 0 if z is None else z.shape[1]
+            k_dim = (0 if z is None else z.shape[1]) + int(np.ceil(k_partialled))
             d_c = max(as2d(candidates[c]).shape[1] for c in remaining)
             outcome = tier.structural_check(n, d_c, as2d(obs).shape[1], k_dim)
             if not outcome.well_posed:
@@ -293,14 +298,16 @@ def greedy_forward_selection(
                        else f"round{round_no}_{winner}")
         def context(name: str, result: str | None = None):
             from model_selection.visualization.adequacy import PlotContext
+            own = sample.covariates if sample.covariates is not None else partialled
             return PlotContext(tier=tier.name, round_no=round_no, candidate=name, selected=tuple(selected),
                                covariate_label=sample.covariate_label,
-                               n_covariate_columns=0 if sample.covariates is None else as2d(sample.covariates).shape[1],
+                               n_covariate_columns=0 if own is None else as2d(own).shape[1],
                                feature_names=sample.feature_names, result=result)
 
         def draw(check, name: str, result: str) -> None:
             if check.plot is not None:
-                path = check.plot(candidates[name], obs, z, round_label, context(name, result))
+                cond = z_rel if check.stage == "relationship" else z
+                path = check.plot(candidates[name], obs, cond, round_label, context(name, result))
                 if path is not None:
                     plots.append(path)
 
@@ -313,14 +320,17 @@ def greedy_forward_selection(
         def run_checks(stage: str, name: str = winner, plot: bool = False) -> list[tuple]:
             values = candidates[name]
             done = []
+            cond = z_rel if stage == "relationship" else z
             for check in tier.adequacy_checks:
-                if check.stage != stage or (check.needs_conditioning and z is None):
+                if check.stage != stage or (check.needs_conditioning and cond is None):
                     continue
                 extra = {}
+                if stage == "removal" and partialled is not None:
+                    extra["interaction_with"] = partialled
                 if check.labels_columns:
                     extra["column_labels"] = (_column_labels(f"candidate '{name}'", values, sample.feature_names)
                                               + _column_labels("observations", obs, sample.feature_names))
-                outcome = check.test(values, obs, z, n_permutations=tier.adequacy_n_permutations,
+                outcome = check.test(values, obs, cond, n_permutations=tier.adequacy_n_permutations,
                                      rng=rng, time_positions=time_positions, min_temporal_lag=lag,
                                      grid_step=sample.grid_step, **extra)
                 done.append((check, outcome))
@@ -362,9 +372,10 @@ def greedy_forward_selection(
             calibration = tier.calibration(winner_values, obs, z, time_positions, lag, rng.spawn(1)[0],
                                            grid_step=sample.grid_step)
             accepted = calibration["calibrated"]
-        n_dims = as2d(winner_values).shape[1] + as2d(obs).shape[1] + (0 if z is None else z.shape[1])
+        n_dims = as2d(winner_values).shape[1] + as2d(obs).shape[1] + (0 if z is None else z.shape[1]) + k_partialled
         samples_per_dimension = n / n_dims
-        k_y, k_x, k_c = as2d(obs).shape[1], as2d(winner_values).shape[1], 0 if z is None else z.shape[1]
+        k_y, k_x = as2d(obs).shape[1], as2d(winner_values).shape[1]
+        k_c = (0 if z is None else z.shape[1]) + k_partialled
         if isinstance(tier.test, LinearResidualTest):
             linear_null = null_column
         else:
@@ -418,7 +429,7 @@ def greedy_forward_selection(
             step.adequacy = record(removal, "decision") + record(informative, "information")
         else:
             step.adequacy = record(removal, "decision")
-            n_relationship = sum(c.stage == "relationship" and not (c.needs_conditioning and z is None)
+            n_relationship = sum(c.stage == "relationship" and not (c.needs_conditioning and z_rel is None)
                                  for c in tier.adequacy_checks)
             level = tier.adequacy_alpha / (len(remaining) * max(n_relationship, 1))
             statistic = dict(zip(result.names, result.observed))

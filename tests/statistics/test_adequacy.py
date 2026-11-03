@@ -1311,3 +1311,52 @@ def test_diagnostic_plots_of_a_round_share_one_kernel_regression(monkeypatch):
     viz.plot_state_independence_diagnostics(c, o, z)
     viz.plot_state_independence_diagnostics(c, o, z, context=ctx)
     assert len(built) == 1
+
+
+def _registration_case(n, rng, interaction):
+    """A selected formulation Z, a registration-like covariate V acting
+    nonlinearly on every series, and a candidate and observations that
+    depend on Z (with a slope that changes with V when interaction)."""
+    V = np.column_stack([rng.uniform(-1, 1, n), rng.uniform(0.1, 0.9, n)])
+    g = np.sin(2 * np.pi * V[:, 1]) * 2 + V[:, 0] ** 2
+    Zs = rng.normal(size=n)
+    slope = 1.0 + (0.9 * V[:, 0] if interaction else 0.0)
+    Z = Zs + 0.3 * rng.normal(size=n) + g
+    O = slope * Zs + 0.7 * rng.normal(size=n) + 1.2 * g
+    C = 0.8 * slope * Zs + 0.7 * rng.normal(size=n) + 0.9 * g
+    return V, Z, C, O
+
+
+def test_with_the_covariates_removed_the_adjustment_test_ignores_their_curvature_and_finds_an_interaction():
+    """The partially linear form of the linear adjustment test: once the
+    registration-like covariate is removed from every series by kernel
+    regression, its own curvature no longer rejects the linear tier, while a
+    slope that changes with it does, through the interaction part."""
+    from model_selection.selection.tiers import SelectionSample, partial_out_covariates
+    from model_selection.statistics.adequacy.specification import linear_specification_test
+    n, t = 150, np.arange(150) * 10.0
+    outcomes = {}
+    for interaction in (False, True):
+        V, Z, C, O = _registration_case(n, np.random.default_rng(3), interaction)
+        res = partial_out_covariates(SelectionSample({"z": Z, "c": C}, O, t, 1, covariates=V))
+        out = linear_specification_test(np.column_stack([res.candidates["c"], res.obs]), res.candidates["z"], 0.05,
+                                        0.02, 599, np.random.default_rng(4), t, 1, n_candidate_columns=1,
+                                        interaction_with=res.partialled_covariates)
+        outcomes[interaction] = out
+    assert outcomes[False].tier_adequate
+    assert not outcomes[True].tier_adequate and "interaction" in outcomes[True].decision_reason
+
+
+def test_partial_out_covariates_residualizes_every_series_and_reports_degrees_of_freedom():
+    from model_selection.selection.tiers import SelectionSample, partial_out_covariates
+    rng = np.random.default_rng(0)
+    V, Z, C, O = _registration_case(100, rng, False)
+    sample = SelectionSample({"z": Z, "c": C}, O, np.arange(100) * 10.0, 1, covariates=V, covariate_label="reg")
+    res = partial_out_covariates(sample)
+    assert res.covariates is None and res.partialled_covariates.shape == (100, 2)
+    assert res.obs.shape == O.shape and res.candidates["c"].shape == C.shape
+    assert 2.0 < res.partialled_df < 100
+    # the covariate's curved effect is gone from the residuals
+    g = np.sin(2 * np.pi * V[:, 1]) * 2 + V[:, 0] ** 2
+    assert abs(np.corrcoef(res.obs, g)[0, 1]) < 0.2 < abs(np.corrcoef(O, g)[0, 1])
+    assert partial_out_covariates(SelectionSample({"c": C}, O, np.arange(100), 1)).covariates is None

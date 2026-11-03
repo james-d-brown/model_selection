@@ -76,6 +76,7 @@ def linear_specification_test(
         grid_step: float | None = None,
         n_candidate_columns: int | None = None,
         max_n: int = 2000,
+        interaction_with: np.ndarray | None = None,
 ) -> AdequacyTestOutcome:
     """Test every column of `columns` for nonlinear dependence on the
     conditioning set.
@@ -93,9 +94,19 @@ def linear_specification_test(
     max_n : largest sample tested; longer records on a regular grid are
         subsampled to max_n evenly spaced points (grid_subsample; the
         bootstrap accounts for the dependence that remains).
+    interaction_with : covariates already removed from every series by
+        kernel regression (the partially linear model of the high-flow
+        linear tier). The test then has two parts, each at alpha / 2: a
+        curvature part, with the radial basis function kernel on the
+        conditioning set, and an interaction part, whose kernel is the
+        product of linear kernels on the conditioning set and on these
+        covariates, so it tests every product of a conditioning column and a
+        covariate together (Maity and Lin, 2011). A column departs when
+        either part rejects for it.
     """
     Y = as2d(np.asarray(columns, dtype=float))
     Z = as2d(np.asarray(conditioning, dtype=float))
+    W_int = None if interaction_with is None else as2d(np.asarray(interaction_with, dtype=float))
     if column_labels is not None and len(column_labels) != Y.shape[1]:
         raise ValueError(f"column_labels has {len(column_labels)} entries for {Y.shape[1]} columns")
     time_positions = np.asarray(time_positions)
@@ -103,38 +114,54 @@ def linear_specification_test(
         idx, time_positions, grid_step, _ = grid_subsample(time_positions, grid_step, min_temporal_lag, max_n, rng,
                                                            at_lag_spacing=False)
         Y, Z = Y[idx], Z[idx]
+        W_int = None if W_int is None else W_int[idx]
     n = Y.shape[0]
     design = np.column_stack([np.ones(n), Z])
     Q, _ = np.linalg.qr(design)
     hc2 = 1.0 / np.sqrt(np.clip(1.0 - np.sum(Q ** 2, axis=1), 1e-12, None))
     Zs = standardize(Z)
-    eigvals, V = np.linalg.eigh(rbf_kernel(Zs, median_heuristic_bandwidth(Zs)))
-    eigvals = np.clip(eigvals, 0.0, None)
-    K = (V * eigvals) @ V.T
-    level = alpha / Y.shape[1]
+    kernels = [("curvature", rbf_kernel(Zs, median_heuristic_bandwidth(Zs)))]
+    if W_int is not None:
+        kernels.append(("interaction", (Zs @ Zs.T) * (standardize(W_int) @ standardize(W_int).T)))
     blocks = []
-    outcomes = []
+
+    def column_outcomes(K_raw, level):
+        eigvals, V = np.linalg.eigh(K_raw)
+        eigvals = np.clip(eigvals, 0.0, None)
+        K = (V * eigvals) @ V.T
+        found = []
+        for j in range(Y.shape[1]):
+            y = Y[:, j]
+            resid = y - Q @ (Q.T @ y)
+            lam = reml_lambda_from_spectrum(eigvals, (V.T @ resid)[:, None])
+            observed, semipartial = (float(v[0]) for v in _kernel_scores(resid[:, None], eigvals, V, lam))
+            resolved = resolve_block(time_positions, min_temporal_lag, [(resid, K @ resid)], run_length, grid_step)
+            blocks.append(resolved)
+            null_stats = np.empty(n_permutations)
+            null_semi = np.empty(n_permutations)
+            for start in range(0, n_permutations, DRAW_CHUNK):
+                stop = min(start + DRAW_CHUNK, n_permutations)
+                W = dependent_wild_weights(time_positions, resolved.length, stop - start, rng)
+                R = (W * (resid * hc2)[None, :]).T
+                R = R - Q @ (Q.T @ R)
+                null_stats[start:stop], null_semi[start:stop] = _kernel_scores(R, eigvals, V, lam)
+            p = permutation_p_value(observed, null_stats)
+            corrected, _ = bias_correct_association(semipartial, null_semi)
+            found.append((p < level and corrected >= effect_size_floor, p, j, semipartial, corrected))
+        return found
+
+    level = alpha / len(kernels) / Y.shape[1]
+    by_part = [(part, column_outcomes(K_raw, level)) for part, K_raw in kernels]
+    # A column's outcome: its departing part if any (the smaller p-value first), else its smallest p-value.
+    outcomes, parts = [], []
     for j in range(Y.shape[1]):
-        y = Y[:, j]
-        resid = y - Q @ (Q.T @ y)
-        lam = reml_lambda_from_spectrum(eigvals, (V.T @ resid)[:, None])
-        observed, semipartial = (float(v[0]) for v in _kernel_scores(resid[:, None], eigvals, V, lam))
-        resolved = resolve_block(time_positions, min_temporal_lag, [(resid, K @ resid)], run_length, grid_step)
-        blocks.append(resolved)
-        null_stats = np.empty(n_permutations)
-        null_semi = np.empty(n_permutations)
-        for start in range(0, n_permutations, DRAW_CHUNK):
-            stop = min(start + DRAW_CHUNK, n_permutations)
-            W = dependent_wild_weights(time_positions, resolved.length, stop - start, rng)
-            R = (W * (resid * hc2)[None, :]).T
-            R = R - Q @ (Q.T @ R)
-            null_stats[start:stop], null_semi[start:stop] = _kernel_scores(R, eigvals, V, lam)
-        p = permutation_p_value(observed, null_stats)
-        corrected, _ = bias_correct_association(semipartial, null_semi)
-        outcomes.append((p < level and corrected >= effect_size_floor, p, j, semipartial, corrected))
+        options = sorted(((o[j], part) for part, o in by_part), key=lambda op: (not op[0][0], op[0][1]))
+        outcomes.append(options[0][0])
+        parts.append(options[0][1])
 
     def name(j):
-        return column_labels[j] if column_labels is not None else f"column {j + 1}"
+        label = column_labels[j] if column_labels is not None else f"column {j + 1}"
+        return f"{label} ({parts[j]})" if len(kernels) > 1 else label
 
     def strongest(group):
         return min(group, key=lambda o: (not o[0], o[1])) if group else None

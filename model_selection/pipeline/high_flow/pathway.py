@@ -64,7 +64,7 @@ from model_selection.pipeline.shared import (
 )
 from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal
 from model_selection.preprocessing.transforms import prepare_series
-from model_selection.selection.tiers import SelectionSample
+from model_selection.selection.tiers import SelectionSample, partial_out_covariates
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
 from model_selection.selection.stage import run_selection_stage
 from model_selection.statistics.power import describe_detectable, minimum_detectable_r2, rao_degrees
@@ -398,10 +398,20 @@ def run_high_flow_analysis(
                                          feature_names=feature_names, covariates=registration,
                                          covariate_label="the registration parameters (window length and peak "
                                                          "position)")
+                # The linear tier works on the partially linear model: the registration parameters are removed
+                # from every series by cross-fitted kernel regression first (docs/methods.md, Linear tier).
+                tier_samples = {}
+                if selection.measure in (CASCADE, "linear"):
+                    tier_samples["linear"] = partial_out_covariates(sample)
+                    notes.append(
+                        "linear tier: the registration parameters were removed from every series by cross-fitted "
+                        "kernel ridge regression before its least-squares regressions (partially linear model), "
+                        f"using {tier_samples['linear'].partialled_df:.1f} effective degrees of freedom, which its "
+                        "power calculation counts as conditioning variables.")
                 outcome = run_selection_stage(
                     sample, dataclasses.replace(selection, n_neighbors=hf_n_neighbors, theiler_window=theiler_window),
                     adequacy,
-                    multivariate=n_dims > 1, rng=rng,
+                    multivariate=n_dims > 1, rng=rng, tier_samples=tier_samples,
                     plot_factory=adequacy_plot_factory(output, gage, "high_flow", feature_names),
                     label=f"high-flow, basin {gage}",
                 )

@@ -125,6 +125,30 @@ class ConditioningRegression:
             out[i] = np.linalg.solve(np.eye(S.size) - H_SS, E[S])[pos]
         return out
 
+    def _best_fit(self, target: np.ndarray):
+        """(eigenvectors, shrinkage, centred residuals) of the bandwidth and
+        penalty that minimize the leave-one-out squared error of `target`."""
+        T = as2d(np.asarray(target, dtype=float))
+        Tc = T - T.mean(axis=0)
+        best = (np.inf, None)
+        for s, U in self.spectra:
+            UtT = U.T @ Tc
+            for lam in RIDGE_PENALTIES:
+                shrink = s / (s + lam)
+                E = Tc - U @ (shrink[:, None] * UtT)
+                h = 1.0 / self.n + (U ** 2) @ shrink
+                err = float(np.sum((E / np.maximum(1.0 - h, 1e-8)[:, None]) ** 2))
+                if err < best[0]:
+                    best = (err, (U, shrink, E))
+        return best[1]
+
+    def effective_df(self, target: np.ndarray) -> float:
+        """Effective degrees of freedom of the fit to `target`, excluding the
+        intercept: the trace of its centred smoother matrix (Buja, Hastie and
+        Tibshirani, 1989), on the scale of the number of regressors."""
+        _, shrink, _ = self._best_fit(target)
+        return float(np.sum(shrink))
+
     def residuals(self, target: np.ndarray, extra: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None]:
         """Cross-fitted residuals of `target` (n, r) and, with the same fitted
         smoother, of `extra` (n, s). The bandwidth and penalty minimize the

@@ -76,6 +76,12 @@ class SelectionSample:
         on in addition to the selected formulations, from round 1 (the
         parameters of the event samples' shared registration); None for none.
     covariate_label : the covariates in words, for diagnostic pages.
+    partialled_covariates : covariates already removed from every series by
+        cross-fitted kernel ridge regression (partial_out_covariates); None
+        otherwise. The linear adjustment test's interaction part and the
+        relationship checks still use them.
+    partialled_df : effective degrees of freedom of that removal, counted as
+        conditioning variables in the power calculation.
     """
     candidates: dict[str, np.ndarray]
     obs: np.ndarray
@@ -85,6 +91,34 @@ class SelectionSample:
     grid_step: float | None = None
     covariates: np.ndarray | None = None
     covariate_label: str | None = None
+    partialled_covariates: np.ndarray | None = None
+    partialled_df: float = 0.0
+
+
+def partial_out_covariates(sample: SelectionSample) -> SelectionSample:
+    """The sample with its covariates removed from every series (each
+    candidate and the observations) by the nonlinear tier's cross-fitted
+    kernel ridge regression, with the dependence-lag buffer: the partially
+    linear model (Robinson, 1988; Chernozhukov et al., 2018). The selected
+    formulations are candidates, so they are residualized too. Used by the
+    high-flow linear tier, so that the registration parameters' nonlinear
+    effect on the event features is removed before its least-squares
+    regressions (docs/methods.md, Linear tier, Regression). The sample's
+    own covariates are returned unchanged when there are none."""
+    if sample.covariates is None or np.asarray(sample.covariates).size == 0:
+        return sample
+    from dataclasses import replace
+    from model_selection.statistics.regression.kernel_residuals import ConditioningRegression
+    V = as2d(np.asarray(sample.covariates, dtype=float))
+    reg = ConditioningRegression(V, sample.time_positions, buffer=sample.dependence_lag)
+
+    def resid(values):
+        values = np.asarray(values, dtype=float)
+        out = reg.residuals(as2d(values))[0]
+        return out[:, 0] if values.ndim == 1 else out
+
+    return replace(sample, candidates={k: resid(v) for k, v in sample.candidates.items()}, obs=resid(sample.obs),
+                   covariates=None, partialled_covariates=V, partialled_df=reg.effective_df(as2d(sample.obs)))
 
 
 @dataclass
@@ -133,13 +167,14 @@ def _effect_modification_check(a: AdequacyConfig, floor: float, run_length: int,
 
 def _specification_check(a: AdequacyConfig, floor: float, run_length: int) -> AdequacyTestFunc:
     def _check(candidate, obs, conditioning, n_permutations=100, rng=None, time_positions=None,
-               min_temporal_lag=0, column_labels=None, grid_step=None):
+               min_temporal_lag=0, column_labels=None, grid_step=None, interaction_with=None):
         columns = np.column_stack([as2d(candidate), as2d(obs)])
         return linear_specification_test(
             columns, conditioning, a.alpha, floor, n_permutations,
             rng or np.random.default_rng(), time_positions if time_positions is not None else np.arange(len(columns)),
             min_temporal_lag, column_labels=column_labels, run_length=run_length, grid_step=grid_step,
             n_candidate_columns=as2d(candidate).shape[1], max_n=a.kernel_check_max_n,
+            interaction_with=interaction_with,
         )
     return _check
 

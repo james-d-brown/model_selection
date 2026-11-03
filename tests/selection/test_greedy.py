@@ -391,3 +391,18 @@ def test_the_winner_is_the_significant_candidate_with_the_largest_effect_size():
     test = _EffectStub({"a": 0.5, "b": 0.3, "c": 0.0}, {"a": 0.05, "b": 0.2, "c": 0.9})
     res = greedy_forward_selection(sample, Tier("stub", test, 0.02), 99, max_selected=1, rng=np.random.default_rng(1))
     assert res.trajectory[0].formulation == "b" and res.trajectory[0].accepted
+
+
+def test_removed_covariates_count_as_conditioning_variables_in_the_power_calculation():
+    """A sample whose covariates were removed by kernel regression counts that
+    fit's effective degrees of freedom, so its detectable contribution is
+    larger than the same sample's without them."""
+    from dataclasses import replace
+    sample = _sample()
+    plain = greedy_forward_selection(sample, _tier({"a": 0.5, "b": 0.0, "c": 0.0}), 99, max_selected=1,
+                                     rng=np.random.default_rng(1))
+    removed = greedy_forward_selection(replace(sample, partialled_covariates=np.zeros((len(sample.obs), 2)),
+                                               partialled_df=8.0),
+                                       _tier({"a": 0.5, "b": 0.0, "c": 0.0}), 99, max_selected=1,
+                                       rng=np.random.default_rng(1))
+    assert removed.trajectory[0].detectable_r2 > plain.trajectory[0].detectable_r2
