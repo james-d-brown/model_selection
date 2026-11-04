@@ -19,6 +19,11 @@ recession, is not an event. It is removed and the remaining windows are
 separated again without it, so where it adjoined an event its timesteps
 return to that event; this repeats until every window contains a peak.
 
+Each event keeps its widened window before separation (widened_start,
+widened_end). Where two widened windows overlap, the later event began
+before the earlier one had receded; the recession-overlap rule of the
+dependence between events uses this (event_detection.dependence).
+
 The per-model own windows are computed once per basin run and passed in
 everywhere, so every consumer sees the same events.
 """
@@ -36,6 +41,9 @@ from model_selection.event_detection.base import DeclusterResult
 class ExpandedEvent:
     """A final event window (attribute-compatible with HighFlowEvent).
     source_consensus_event_ids holds the consensus event it was built from.
+    widened_start, widened_end : the window widened to the formulations'
+    own events, before overlapping windows were separated (None when not
+    built by build_expanded_events).
     """
     event_id: int
     start: int
@@ -47,6 +55,8 @@ class ExpandedEvent:
     start_time: "object | None" = None  # pd.Timestamp, set by attach_timestamps
     end_time: "object | None" = None
     peak_time: "object | None" = None
+    widened_start: int | None = None
+    widened_end: int | None = None
 
 
 def expand_event_to_model_union(
@@ -149,14 +159,15 @@ def build_expanded_events(
     expanded = expand_all_events(consensus_events, own_windows)
     peaks = {ev.event_id: (ev.peak_index if ev.peak_index is not None else ev.start) for ev in consensus_events}
     separated = separate_overlapping_windows(expanded, peaks, peak_series)
+    kept = expanded
     if own_peaks:
-        kept = expanded
         while separated and (removed := windows_without_peak(separated, own_peaks)):
             if removed_windows is not None:
                 removed_windows.extend((eid, s, e) for eid, s, e in separated if eid in removed)
             kept = [w for w in kept if w[0] not in removed]
             separated = separate_overlapping_windows(kept, peaks, peak_series)
 
+    widened = {eid: (s, e) for eid, s, e in kept}
     events = []
     for i, (source_id, start, end) in enumerate(separated):
         peak_i = None
@@ -171,6 +182,8 @@ def build_expanded_events(
             source_consensus_event_ids=[source_id],
             peak_index=peak_i,
             n_formulations_with_peak=(formulations_with_peak(start, end, own_peaks) if own_peaks else None),
+            widened_start=widened[source_id][0],
+            widened_end=widened[source_id][1],
         ))
     return events
 

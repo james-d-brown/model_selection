@@ -235,6 +235,9 @@ class ResolvedBlock:
     n_samples : the number of samples resampled.
     too_few_to_assess : the samples lie on a grid but are fewer than
         MIN_ACF_N, so their dependence was not estimated.
+    independent_units : samples not on a grid whose distinct positions are
+        all at least one lag apart (clusters of events, or events all
+        independent); n_blocks is then the number of those units.
     """
     length: int
     estimated: bool
@@ -243,6 +246,7 @@ class ResolvedBlock:
     n_blocks: float | None = None
     n_samples: int | None = None
     too_few_to_assess: bool = False
+    independent_units: bool = False
 
     @property
     def few_blocks(self) -> bool:
@@ -252,7 +256,8 @@ class ResolvedBlock:
         return {"block_length": self.length, "estimated": self.estimated,
                 "decorrelation_lag": self.decorrelation_lag, "dependence_decays": self.decays,
                 "n_blocks": self.n_blocks, "few_blocks": self.few_blocks,
-                "n_samples": self.n_samples, "too_few_to_assess": self.too_few_to_assess}
+                "n_samples": self.n_samples, "too_few_to_assess": self.too_few_to_assess,
+                "independent_units": self.independent_units}
 
 
 def trace_autocovariance(P: np.ndarray, grid_index: np.ndarray, length: int) -> np.ndarray:
@@ -298,13 +303,21 @@ def trace_autocovariance_features(F: np.ndarray, grid_index: np.ndarray, length:
 def _caller_lag_block(time_positions: np.ndarray, fallback_lag: float) -> "ResolvedBlock":
     """Block of the caller's dependence lag for samples not on a regular
     grid (event samples). n_blocks is the samples' time span divided by the
-    lag, as for samples on a grid; None when the samples are resampled
-    independently (lag of zero or less) or span no time."""
+    lag, as for samples on a grid, or, when every distinct position is at
+    least one lag from the next (clusters of events, or events that are all
+    independent), the number of distinct positions, each an independent
+    unit; None when the samples are resampled independently (lag of zero or
+    less) or span no time."""
     t = np.asarray(time_positions, dtype=float)
     length = int(round(max(fallback_lag, 0)))
     span = float(t.max() - t.min()) if t.size else 0.0
     n_blocks = span / length if length > 0 and span > 0 else None
-    return ResolvedBlock(length, estimated=False, n_samples=int(t.size), n_blocks=n_blocks)
+    units = False
+    if n_blocks is not None:
+        positions = np.unique(t)
+        if positions.size > 1 and float(np.min(np.diff(positions))) >= length:
+            n_blocks, units = float(positions.size), True
+    return ResolvedBlock(length, estimated=False, n_samples=int(t.size), n_blocks=n_blocks, independent_units=units)
 
 
 def resolve_block_from_inner_products(

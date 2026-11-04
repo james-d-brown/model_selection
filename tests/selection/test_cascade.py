@@ -372,3 +372,4 @@ def test_the_powerless_escalated_tier_flag_looks_at_the_stopping_round():
     assert not flagged([step(True, 0.75), step(False, 0.015)])
     assert flagged([step(True, 0.75), step(False, 0.19)])
     assert not flagged([step(True, 0.75)])
+

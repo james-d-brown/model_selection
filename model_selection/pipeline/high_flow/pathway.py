@@ -29,6 +29,7 @@ import logging
 import os
 
 import numpy as np
+import pandas as pd
 
 from model_selection.event_detection.config import EventConfig
 from model_selection.event_detection.consensus import (
@@ -68,6 +69,8 @@ from model_selection.selection.tiers import SelectionSample, partial_out_covaria
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
 from model_selection.selection.stage import run_selection_stage
 from model_selection.statistics.power import describe_detectable, minimum_detectable_r2, rao_degrees
+from model_selection.event_detection.dependence import arrival_clusters, recession_clusters, subset_labels
+from model_selection.statistics.significance.clusters import cluster_coordinates, cluster_summary
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,56 @@ def _min_valid_neighbor_count(time_positions: np.ndarray, lag: int) -> int:
         return 0
     diffs = np.abs(positions[:, None] - positions[None, :])
     return int((diffs >= lag).sum(axis=1).min())
+
+
+def _peak(ev) -> int:
+    return ev.peak_index if ev.peak_index is not None else ev.start
+
+
+def event_dependence(rule: str, all_events: list, retained_ids: list, dependence_lag: int,
+                     step_hours: float) -> tuple[np.ndarray, int, np.ndarray | None, dict]:
+    """(time positions, dependence lag, cluster labels or None, record) of the
+    retained events under a dependence rule (docs/methods.md, Dependence
+    between high-flow events). With "lag" the positions are the events'
+    peaks and the lag is the dependence lag. With "recession" or "arrivals"
+    the clusters are formed on all final events, so that events chained
+    through an event dropped later stay in one cluster, and the retained
+    events receive cluster coordinates (statistics.significance.clusters).
+    The record reports the clusters and the gaps between consecutive
+    clusters, in hours."""
+    by_id = {ev.event_id: ev for ev in all_events}
+    peaks = np.array([_peak(by_id[eid]) for eid in retained_ids])
+    if rule == "lag":
+        return peaks, dependence_lag, None, {"rule": "lag", "dependence_lag": int(dependence_lag)}
+    all_peaks = np.array([_peak(ev) for ev in all_events])
+    record = {"rule": rule}
+    if rule == "recession":
+        starts = [ev.widened_start if ev.widened_start is not None else ev.start for ev in all_events]
+        ends = [ev.widened_end if ev.widened_end is not None else ev.end for ev in all_events]
+        labels_all = recession_clusters(starts, ends, all_peaks)
+    else:
+        labels_all, run = arrival_clusters(all_peaks)
+        record.update(extremal_index=run.extremal_index, run_length_hours=run.run_length * step_hours)
+    index_of = {ev.event_id: k for k, ev in enumerate(all_events)}
+    labels = subset_labels(labels_all, np.array([index_of[eid] for eid in retained_ids], dtype=int))
+    positions, lag = cluster_coordinates(labels, peaks)
+    record.update(cluster_summary(labels))
+    # Gap from the end of each cluster's last event to the start of the next cluster's first event.
+    order = np.argsort(positions, kind="stable")
+    ends_by = {}
+    starts_by = {}
+    for k in order:
+        ev = by_id[retained_ids[k]]
+        ends_by[positions[k]] = max(ends_by.get(positions[k], ev.end), ev.end)
+        starts_by.setdefault(positions[k], ev.start)
+        starts_by[positions[k]] = min(starts_by[positions[k]], ev.start)
+    keys = sorted(ends_by)
+    gaps = np.array([starts_by[b] - ends_by[a] for a, b in zip(keys[:-1], keys[1:])], dtype=float) * step_hours
+    if gaps.size:
+        record["gaps_between_clusters_hours"] = {
+            "shortest": float(gaps.min()), "q10": float(np.quantile(gaps, 0.1)),
+            "median": float(np.median(gaps)), "shortest_five": sorted(float(g) for g in np.sort(gaps)[:5])}
+    return positions, lag, labels, record
 
 
 def _max_lag_for_min_neighbors(time_positions: np.ndarray, floor: int, max_lag: int) -> int:
@@ -232,6 +285,8 @@ def run_high_flow_analysis(
     fidelity_by_series, fidelity_by_event = {}, []
     peak_phase_spread, ensemble = {}, {}
     sensitivity = None
+    dependence_record = None
+    all_events = []
     detectable_r2 = None
     power_stop_reason = None
     n_components = 0
@@ -368,10 +423,16 @@ def run_high_flow_analysis(
             if power_stop_reason:
                 notes.append(f"High-flow selection not run: {power_stop_reason}")
             else:
-                time_positions = np.array([
-                    event_by_id[eid].peak_index if event_by_id[eid].peak_index is not None else event_by_id[eid].start
-                    for eid in retained_event_ids
-                ])
+                # Which events the tests treat as dependent (docs/methods.md, Dependence between samples).
+                step_hours = (basin.obs.index[1] - basin.obs.index[0]) / pd.Timedelta(hours=1)
+                time_positions, test_lag, clusters, dependence_record = event_dependence(
+                    events.dependence, all_events, retained_event_ids, min_temporal_lag, step_hours)
+                if clusters is not None:
+                    notes.append(
+                        f"dependence between events ({events.dependence}): {dependence_record['n_clusters']} clusters "
+                        f"of {dependence_record['n_samples']} events; {dependence_record['n_in_multi_sample_clusters']} "
+                        f"events share a cluster (largest {dependence_record['largest_cluster']}). Events in different "
+                        "clusters are treated as independent, and every test keeps a cluster together.")
 
                 hf_n_neighbors = min(selection.n_neighbors, max(2, n_fpc_events - 1))
                 if hf_n_neighbors < selection.n_neighbors:
@@ -382,9 +443,9 @@ def run_high_flow_analysis(
                 # permutation partners. Only the local permutation needs the shorter
                 # window; every other test keeps the full dependence lag.
                 partner_floor = min(hf_n_neighbors, 5)
-                min_valid = _min_valid_neighbor_count(time_positions, min_temporal_lag)
+                min_valid = _min_valid_neighbor_count(time_positions, test_lag)
                 theiler_window = None
-                if min_valid < partner_floor:
+                if clusters is None and min_valid < partner_floor:
                     theiler_window = _max_lag_for_min_neighbors(time_positions, partner_floor, min_temporal_lag)
                     notes.append(
                         f"high-flow free-form tier's Theiler window reduced from {min_temporal_lag} to "
@@ -394,8 +455,8 @@ def run_high_flow_analysis(
                     )
 
                 feature_names = tuple(f"PC{c + 1}" for c in range(n_components))
-                sample = SelectionSample(candidate_events, obs_features, time_positions, min_temporal_lag,
-                                         feature_names=feature_names, covariates=registration,
+                sample = SelectionSample(candidate_events, obs_features, time_positions, test_lag,
+                                         feature_names=feature_names, covariates=registration, clusters=clusters,
                                          covariate_label="the registration parameters (window length and peak "
                                                          "position)")
                 # The linear tier works on the partially linear model: the registration parameters are removed
@@ -422,7 +483,7 @@ def run_high_flow_analysis(
                     raw_formulations, obs_values, expanded_events, retained_event_ids,
                     result_selection, time_positions, tier=outcome.tier,
                     n_permutations=selection.resolved_n_permutations, alpha=selection.alpha,
-                    dependence_lag=min_temporal_lag, n_components=n_components, fpca_config=fpca,
+                    dependence_lag=test_lag, n_components=n_components, fpca_config=fpca,
                     reconstruction_by_series=fidelity_by_series, rng=rng,
                     registration=registration,
                 )
@@ -464,6 +525,7 @@ def run_high_flow_analysis(
         requires_closer_inspection=sensitivity["requires_closer_inspection"] if sensitivity else False,
         ensemble_representation=ensemble,
         min_temporal_lag=min_temporal_lag,
+        event_dependence=dependence_record,
         missing_values=missing_values,
         seasonal_conditioning={"enabled": seasonal.enabled,
                                   "window_days": seasonal.window_days if seasonal.enabled else None,

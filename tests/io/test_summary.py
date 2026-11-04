@@ -149,3 +149,17 @@ def test_few_blocks_of_event_samples_produce_a_review_flag():
     flags = [f for f in review_flags(result) if f["code"] == "few_blocks"]
     assert len(flags) == 1 and "10.0" in flags[0]["message"] and "events" in flags[0]["message"]
 
+
+
+def test_few_clusters_and_correlated_cluster_terms_produce_their_flags():
+    result = _pooled(False)
+    result.selection.trajectory[0].dependence = {
+        "block_length": 2, "estimated": False, "n_blocks": 30.0, "few_blocks": True, "independent_units": True,
+        "cluster_terms_correlation": 0.45, "cluster_terms_standard_error": 0.18, "n_clusters": 30,
+        "cluster_terms_correlated": True}
+    flags = {f["code"]: f["message"] for f in review_flags(result)}
+    assert set(flags) == {"few_blocks", "event_terms_correlated"}
+    assert "30 independent clusters" in flags["few_blocks"] and "MacKinnon and Webb" in flags["few_blocks"]
+    assert "0.45" in flags["event_terms_correlated"] and "30 clusters" in flags["event_terms_correlated"]
+    result.selection.trajectory[0].dependence.update(cluster_terms_correlated=False, n_blocks=80.0, few_blocks=False)
+    assert review_flags(result) == []

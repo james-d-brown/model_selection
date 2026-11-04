@@ -40,6 +40,8 @@ from model_selection.statistics.power import effective_sample_size, format_share
 from model_selection.statistics.conditional_independence import LinearResidualTest
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH
 from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
+from model_selection.statistics.significance.clusters import consecutive_cluster_correlation
+from model_selection.statistics.regression.linear import ols_fit
 from model_selection.utils import as2d
 
 logger = logging.getLogger(__name__)
@@ -434,6 +436,18 @@ def greedy_forward_selection(
             effective_sample_size=n_eff,
             cmi_calibration=calibration,
         ))
+        if sample.clusters is not None:
+            # Do the terms of the statistic stay correlated across clusters treated as independent? The terms are
+            # the products of the winner's and the observations' least-squares residuals on the conditioning set
+            # (docs/methods.md, Dependence between samples).
+            r_c, r_o = ols_fit(as2d(winner_values), z)[1], ols_fit(as2d(obs), z)[1]
+            check = consecutive_cluster_correlation((r_c[:, :, None] * r_o[:, None, :]).reshape(n, -1),
+                                                    time_positions, alpha)
+            trajectory[-1].dependence = {**(trajectory[-1].dependence or {}),
+                                         "cluster_terms_correlation": check["correlation"],
+                                         "cluster_terms_standard_error": check["standard_error"],
+                                         "n_clusters": check["n_clusters"],
+                                         "cluster_terms_correlated": check["significant"]}
         logger.info(f"[+] {winner}: p={p_value:.4g}, effect {bias_corrected:.4g}, "
                     f"accepted={accepted}.")
         if calibration is not None and not calibration["calibrated"]:

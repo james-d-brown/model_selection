@@ -218,7 +218,10 @@ def test_independent_multivariate_candidate_rejected_by_linear_tier():
     assert result.selection.selected == []
     step = result.selection.trajectory[0]
     assert not step.accepted
-    assert abs(step.effect - (step.association - step.null_mean)) < 1e-9
+    # The effect is 1 - Wilks' lambda less its chance level from the null mean of Pillai's trace.
+    from model_selection.statistics.conditional_independence.linear import chance_level
+    pc = step.diagnostics["partial_canonical_correlation"]
+    assert abs(step.effect - (pc - chance_level(np.array([step.null_mean]), q, p))) < 1e-9
 
 
 def test_multivariate_adequacy_plots_written_through_real_cascade():
@@ -686,10 +689,12 @@ def test_wasp_flags_a_series_whose_scale_range_is_too_short():
 
 
 def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
-    """Where the dependence lag would leave an event fewer than five
+    """With the decorrelation length as the rule for dependence between
+    events, where the dependence lag would leave an event fewer than five
     permutation partners, the high-flow pathway shortens the free-form tier's
     Theiler window; the selection sample keeps the full dependence lag, which
-    every other test uses."""
+    every other test uses. With clusters there is nothing to shorten: only an
+    event's own cluster is excluded."""
     import model_selection.pipeline.high_flow.pathway as pathway_module
     captured = {}
     real = pathway_module.run_selection_stage
@@ -702,7 +707,7 @@ def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
     # 15 events in 3000 hours: a 1200-hour lag leaves each event few partners outside it.
     result = run_high_flow_analysis(make_synthetic_basin(n_hours=3000, n_events=15),
                                     SelectionConfig(measure="linear", n_permutations=20, min_temporal_lag=1200),
-                                    rng=np.random.default_rng(3))
+                                    events=EventConfig(dependence="lag"), rng=np.random.default_rng(3))
     assert captured["lag"] == 1200
     assert captured["window"] is not None and captured["window"] < 1200
     assert any("Theiler window reduced from 1200" in note for note in result.notes)
@@ -737,3 +742,46 @@ def test_long_pooled_records_give_the_nonlinear_tier_the_full_cap(monkeypatch):
         rows = np.searchsorted(full.time_positions, np.rint(sub.time_positions))
         assert np.all(np.abs(full.time_positions[rows] - sub.time_positions) <= 0.5)
         assert np.array_equal(full.obs[rows], sub.obs)
+
+
+@pytest.mark.parametrize("rule", ["recession", "arrivals", "lag"])
+def test_high_flow_dependence_rules(rule):
+    """Each rule records which events are dependent. With clusters the
+    tests count clusters as their independent units and check the terms
+    between consecutive clusters; with the lag the events keep their peak
+    positions and the dependence lag."""
+    basin = make_synthetic_basin(seed=3, n_hours=6000, n_events=25)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = run_high_flow_analysis(basin, SelectionConfig(measure="cascade", n_permutations=50),
+                                        events=EventConfig(dependence=rule), output=OutputConfig(output_dir=tmpdir),
+                                        rng=np.random.default_rng(4))
+    record = result.event_dependence
+    assert record["rule"] == rule
+    json.dumps(high_flow_result_to_dict(result))
+    step = result.selection.trajectory[0]
+    if rule == "lag":
+        assert record["dependence_lag"] == result.min_temporal_lag and step.dependence_lag == result.min_temporal_lag
+        assert "cluster_terms_correlation" not in (step.dependence or {})
+    else:
+        assert record["n_samples"] == len(result.high_flow_events) and record["n_clusters"] <= record["n_samples"]
+        assert step.dependence_lag == 2 and step.dependence["n_clusters"] == record["n_clusters"]
+        assert step.dependence["n_blocks"] == record["n_clusters"] and step.dependence["independent_units"]
+        assert "gaps_between_clusters_hours" in record
+        if rule == "arrivals":
+            assert 0 < record["extremal_index"] <= 1 and record["run_length_hours"] >= 0
+
+
+def test_recession_clusters_chain_events_whose_windows_overlap():
+    """Events built from overlapping widened windows share a cluster."""
+    from model_selection.event_detection.windows import ExpandedEvent
+    events = [ExpandedEvent(0, 0, 9, 10, peak_index=5, widened_start=0, widened_end=14),
+              ExpandedEvent(1, 10, 20, 11, peak_index=15, widened_start=8, widened_end=20),
+              ExpandedEvent(2, 40, 50, 11, peak_index=45, widened_start=40, widened_end=50)]
+    positions, lag, labels, record = hf_pathway.event_dependence("recession", events, [0, 1, 2], 500, 1.0)
+    assert list(labels) == [0, 0, 1] and positions[0] == positions[1] and positions[2] - positions[1] >= lag
+    assert record["n_clusters"] == 2 and record["gaps_between_clusters_hours"]["shortest"] == 20.0
+    # Retaining only the first and last event keeps them apart.
+    _, _, labels, _ = hf_pathway.event_dependence("recession", events, [0, 2], 500, 1.0)
+    assert list(labels) == [0, 1]
+    positions, lag, labels, record = hf_pathway.event_dependence("lag", events, [0, 1, 2], 500, 1.0)
+    assert labels is None and lag == 500 and list(positions) == [5, 15, 45]

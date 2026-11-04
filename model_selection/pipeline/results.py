@@ -68,6 +68,11 @@ class HighFlowResult:
     fpca_fit_source: str
     fpca_cumulative_explained_variance: float
     min_temporal_lag: int
+    event_dependence: dict | None = None
+    """Which events the tests treated as dependent: the rule, and for
+    clusters their number and sizes, the gaps between consecutive clusters
+    and, for clustering of arrivals, the run length (docs/methods.md,
+    Dependence between samples)."""
     missing_values: dict | None = None
     seasonal_conditioning: dict | None = None
     pot_ratio: float = 2.0 / 3.0
@@ -129,13 +134,27 @@ def _dependence_flags(where: str, sources: list[tuple[str, dict | None]]) -> lis
                 "blocks were shorter than one lag, or a block's fit kept its neighbouring blocks for lack of "
                 "samples; dependence can leak between fitting and prediction, which may make the test reject "
                 "too often.")})
+        if dep and dep.get("cluster_terms_correlated"):
+            flags.append({"code": "event_terms_correlated", "message": (
+                f"{where}, {what}: the terms of the statistic (the products of the candidate's and the "
+                "observations' least-squares residuals) of consecutive clusters of events were correlated "
+                f"({dep.get('cluster_terms_correlation', 0.0):.2f}, standard error "
+                f"{dep.get('cluster_terms_standard_error', 0.0):.2f} over {dep.get('n_clusters')} clusters), so "
+                "dependence persists across events treated as independent, and the null may be too narrow "
+                "(docs/methods.md, Dependence between samples).")})
         if dep and dep.get("low_rank_material"):
             flags.append({"code": "low_rank_material", "message": (
                 f"{where}, {what}: a kernel factor reached the rank cap, and the cross-fitted residual sum of "
                 f"squares changed by {dep.get('low_rank_rank_change', 0.0):.2g} (relative) between half the "
                 "rank and the cap, so the effect size may still move by about twice that, as much as the "
                 "effect-size floor; raise SelectionConfig.nonlinear_rank (docs/methods.md, Nonlinear tier).")})
-        if dep and not dep.get("estimated") and dep.get("few_blocks"):
+        if dep and not dep.get("estimated") and dep.get("few_blocks") and dep.get("independent_units"):
+            flags.append({"code": "few_blocks", "message": (
+                f"{where}, {what}: the events were resampled as {dep.get('n_blocks', 0):.0f} independent clusters "
+                f"of dependent events, fewer than the minimum of {MIN_BLOCKS} (a convention). With few clusters "
+                "the wild cluster bootstrap can reject too often (MacKinnon and Webb, 2017; docs/methods.md, "
+                "Dependence between samples).")})
+        elif dep and not dep.get("estimated") and dep.get("few_blocks"):
             flags.append({"code": "few_blocks", "message": (
                 f"{where}, {what}: the samples are not on a regular time grid "
                 f"(events), and were resampled in blocks of the dependence lag, {dep.get('n_blocks', 0):.1f} "
@@ -242,6 +261,10 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         (meaningful-effect threshold, else the acceptance floor) with 80%
         power: the stop reflects too few samples, not an absence of
         information.
+
+    event_terms_correlated : in a step on high-flow events in clusters,
+        the terms of the statistic were correlated between consecutive
+        clusters (docs/methods.md, Dependence between samples).
 
     The resampling flags (few_blocks, crossfit_blocks_short,
     dependent_samples_permuted, dependence_not_decaying) are raised for every
@@ -504,6 +527,7 @@ def high_flow_result_to_dict(result: HighFlowResult) -> dict:
         "zero_flow_fraction": result.zero_flow_fraction,
         "zero_flow_flag": result.zero_flow_flag,
         "min_temporal_lag": result.min_temporal_lag,
+        "event_dependence": result.event_dependence,
         "seasonal_conditioning": result.seasonal_conditioning,
         "pot_ratio": result.pot_ratio,
         "recession_ratio": result.recession_ratio,

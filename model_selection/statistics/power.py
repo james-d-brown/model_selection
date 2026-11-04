@@ -1,10 +1,10 @@
 """
 Power of the linear tier's test: Rao's F test of Cohen's set correlation.
 
-The linear tier's statistic, 1 - Wilks' lambda of the residuals of the
+The linear tier's effect size, 1 - Wilks' lambda of the residuals of the
 candidate and the observations on the selected set, is Cohen's partial set
-correlation R^2 (Cohen, 1982). Its significance is tested by Rao's (1973) F
-approximation, and its power follows Cohen (1988, chapter 10):
+correlation R^2 (Cohen, 1982). The power of Rao's (1973) F test of it
+follows Cohen (1988, chapter 10):
 
   effect size (10.2.2)   f^2 = L^(-1/s) - 1, with L the population Wilks' lambda
   noncentrality (10.3.1) lambda = f^2 (u + v + 1)
@@ -21,14 +21,21 @@ The noncentral F distribution is evaluated exactly (scipy), as recommended
 over approximations by Bradley et al. (1998). Cohen and Nee (1987) validated
 power calculations for this test by Monte Carlo.
 
-N is the effective sample size. Under independence, Bartlett's (1938)
-correction gives (N - 1 - k_C - (k_Y + k_X + 1) / 2) (-ln L) ~ chi^2(u), so
-the mean of -ln L under the null is u / (N - 1 - k_C - (k_Y + k_X + 1) / 2).
-Autocorrelated samples carry less information than their number, and the
-test's resampled null, which reproduces that dependence, is wider than the
-independent one. Matching its mean to Bartlett's gives the number of
+N is the effective sample size. The linear tier's test statistic is Pillai's
+trace PT, the sum of the squared canonical correlations (Pillai, 1955). For N
+independent samples whose observations have normal errors of constant
+variance, its null mean is u / (N - 1 - k_C): the observations' orthonormal
+residuals span a k_Y-dimensional subspace of the N - 1 - k_C residual
+dimensions, every orientation equally likely, and a unit vector's squared
+projection onto such a subspace has mean k_Y / (N - 1 - k_C) (Dasgupta and
+Gupta, 2003). Autocorrelated samples carry less information than their
+number, and the test's resampled null, which reproduces that dependence, is
+wider than the independent one. Matching its mean gives the number of
 independent samples with the same null, which is used as N (the first-moment
-matching of Satterthwaite, 1946).
+matching of Satterthwaite, 1946). For a single feature the test is the same
+as Rao's F test, whose power is computed here; with several, Rao's test's
+power is used for Pillai's trace too (docs/methods.md, Detectable contribution and
+effective sample size).
 
 See docs/methods.md, Samples.
 """
@@ -68,16 +75,15 @@ def set_correlation_power(n: float, k_y: int, k_x: int, k_c: int, f2: float, alp
     return float(stats.ncf.sf(critical, d.u, d.v, f2 * (d.u + d.v + 1.0)))
 
 
-def effective_sample_size(n: float, null_r2: np.ndarray, k_y: int, k_x: int, k_c: int = 0) -> float:
-    """Number of independent samples whose null distribution of the set
-    correlation R^2 has the same mean of -ln(1 - R^2) as the resampled null
-    draws null_r2 (Bartlett, 1938), at most n."""
-    draws = np.clip(np.asarray(null_r2, dtype=float), 0.0, 1.0 - 1e-12)
-    mean_log = float(np.mean(-np.log1p(-draws))) if draws.size else 0.0
-    if not np.isfinite(mean_log) or mean_log <= 0:
+def effective_sample_size(n: float, null_trace: np.ndarray, k_y: int, k_x: int, k_c: float = 0) -> float:
+    """Number of independent samples whose null mean of Pillai's trace,
+    k_y k_x / (N - 1 - k_c), equals the mean of the resampled null draws
+    null_trace (module docstring), at most n."""
+    draws = np.asarray(null_trace, dtype=float)
+    mean = float(np.mean(draws)) if draws.size else 0.0
+    if not np.isfinite(mean) or mean <= 0:
         return float(n)
-    n_eff = 1.0 + k_c + (k_y + k_x + 1) / 2.0 + k_y * k_x / mean_log
-    return float(min(n, n_eff))
+    return float(min(n, 1.0 + k_c + k_y * k_x / mean))
 
 
 def f2_to_r2(f2: float, k_y: int, k_x: int) -> float:

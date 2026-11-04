@@ -200,7 +200,8 @@ def test_nonlinear_tier_magnitude_is_on_the_set_correlation_scale():
     c = rng.normal(size=(n, 3)) + z
     o = np.column_stack([0.5 * c[:, 0] + z[:, 0] + rng.normal(size=n)]
                         + [z[:, 0] + rng.normal(size=n) for _ in range(2)])
-    set_r2 = LinearResidualTest().run({"c": c}, o, z, 10, rng, np.arange(n), 0).observed[0]
+    set_r2 = LinearResidualTest().run({"c": c}, o, z, 10, rng, np.arange(n), 0).diagnostics["c"][
+        "partial_canonical_correlation"]
     test = NonlinearResidualTest()
     res = test.run({"c": c}, o, z, 10, rng, np.arange(n), 0)
     effect, null_mean = test.magnitude(c, o, z, np.arange(n), 0, res.observed[0], res.null[:, 0])
@@ -322,7 +323,10 @@ def test_independent_multiplier_distributions_of_the_escalation_tests():
     assert StateIndependenceTest.independent_multipliers == "rademacher"
 
 
-def test_the_linear_tier_requests_rademacher_multipliers(monkeypatch):
+def test_the_linear_tier_uses_gaussian_multipliers(monkeypatch):
+    """Pillai's trace is a quadratic form in the multipliers, so they are
+    standard normal even where samples are independent, as in the nonlinear
+    tier (docs/methods.md, Linear tier, Null distribution)."""
     import model_selection.statistics.conditional_independence.linear as linear_module
     seen = []
     real = linear_module.dependent_wild_weights
@@ -336,7 +340,7 @@ def test_the_linear_tier_requests_rademacher_multipliers(monkeypatch):
     z = rng.normal(size=(60, 1))
     LinearResidualTest().run({"c": z[:, 0] + rng.normal(size=60)}, z[:, 0] + rng.normal(size=60), z, 49, rng,
                              np.arange(60), 1)
-    assert seen and set(seen) == {"rademacher"}
+    assert seen and set(seen) == {"gaussian"}
 
 
 def test_cmi_estimator_excludes_temporal_neighbours_exactly():
@@ -359,3 +363,98 @@ def test_cmi_estimator_excludes_temporal_neighbours_exactly():
             total += digamma(count(z) + 1) - digamma(count(XZ) + 1) - digamma(count(YZ) + 1)
         expected = digamma(k) + total / n
         assert CachedCMI(y, z, k=k, time_positions=t, theiler_window=w)(x) == pytest.approx(expected, abs=1e-10)
+
+
+def _dominant_events(n, d, beta, rng, sigma=1.0):
+    """Independent events whose magnitude, shared by every series, is
+    lognormal: a few large events dominate the residual products."""
+    scale = np.exp(sigma * rng.normal(size=(n, 1)))
+    z = rng.normal(size=(n, 2)) * scale
+    c = 0.5 * z @ rng.normal(size=(2, d)) + rng.normal(size=(n, d)) * scale
+    o = 0.5 * z @ rng.normal(size=(2, d)) + beta * c + rng.normal(size=(n, d)) * scale
+    return c, o, z
+
+
+def test_the_linear_statistic_is_pillais_trace_and_the_effect_is_pc_less_its_chance_level():
+    from model_selection.statistics.association.canonical import canonical_correlations
+    from model_selection.statistics.conditional_independence.linear import chance_level
+    from model_selection.statistics.regression.linear import ols_fit
+    rng = np.random.default_rng(21)
+    n = 120
+    z = rng.normal(size=(n, 2))
+    c = rng.normal(size=(n, 3)) + z[:, :1]
+    o = 0.4 * c + rng.normal(size=(n, 3))
+    test = LinearResidualTest()
+    res = test.run({"c": c}, o, z, 199, rng, np.arange(n), 0)
+    rho = canonical_correlations(ols_fit(c, z)[1], ols_fit(o, z)[1])
+    assert res.observed[0] == pytest.approx(np.sum(rho ** 2))
+    pc = 1 - np.prod(1 - rho ** 2)
+    assert res.diagnostics["c"]["partial_canonical_correlation"] == pytest.approx(pc)
+    effect, chance = test.magnitude(c, o, z, np.arange(n), 0, res.observed[0], res.null[:, 0])
+    assert chance == pytest.approx(chance_level(res.null[:, 0], 3, 3)) and 0 < chance < 0.5
+    assert effect == pytest.approx(pc - chance)
+    # For a single feature the statistic is the squared partial correlation.
+    r1 = test.run({"c": c[:, 0]}, o[:, 0], z, 9, rng, np.arange(n), 0)
+    rc, ro = ols_fit(c[:, 0], z)[1].ravel(), ols_fit(o[:, 0], z)[1].ravel()
+    assert r1.observed[0] == pytest.approx(np.corrcoef(rc, ro)[0, 1] ** 2)
+
+
+def test_the_chance_level_matches_the_null_mean_of_one_minus_wilks_lambda():
+    """For independent normal samples the chance level from the null mean of
+    Pillai's trace is the mean of 1 - Wilks' lambda (Bartlett's
+    approximation, within a few per cent)."""
+    from model_selection.statistics.association.canonical import canonical_correlations
+    from model_selection.statistics.conditional_independence.linear import chance_level
+    rng = np.random.default_rng(22)
+    n, p, k = 80, 3, 2
+    pt, wilks = [], []
+    for _ in range(3000):
+        z = np.column_stack([np.ones(n), rng.normal(size=(n, k))])
+        resid = lambda y: y - z @ np.linalg.lstsq(z, y, rcond=None)[0]
+        rho = canonical_correlations(resid(rng.normal(size=(n, p))), resid(rng.normal(size=(n, p))))
+        pt.append(np.sum(rho ** 2))
+        wilks.append(1 - np.prod(1 - rho ** 2))
+    assert np.mean(pt) == pytest.approx(p * p / (n - 1 - k), rel=0.03)
+    assert chance_level(np.array(pt), p, p) == pytest.approx(np.mean(wilks), rel=0.05)
+    assert chance_level(np.zeros(5), p, p) == 0.0 and chance_level(np.full(5, 50.0), p, p) == 1.0
+
+
+def test_the_effective_sample_size_recovers_n_for_independent_multivariate_nulls():
+    from model_selection.statistics.association.canonical import canonical_correlations
+    from model_selection.statistics.power import effective_sample_size
+    rng = np.random.default_rng(23)
+    n, p, k = 100, 3, 2
+    draws = []
+    for _ in range(3000):
+        z = np.column_stack([np.ones(n), rng.normal(size=(n, k))])
+        resid = lambda y: y - z @ np.linalg.lstsq(z, y, rcond=None)[0]
+        draws.append(np.sum(canonical_correlations(resid(rng.normal(size=(n, p))), resid(rng.normal(size=(n, p)))) ** 2))
+    assert effective_sample_size(10 * n, np.array(draws), p, p, k) == pytest.approx(n, rel=0.03)
+
+
+def test_a_strong_contribution_carried_by_a_few_dominant_events_is_detected():
+    """When a few large events carry most of the residual products, many
+    reweighted null draws have singular values above one. Pillai's trace
+    stays defined for them, so a strong contribution is not held at a floor
+    set by the share of such draws (the earlier Wilks' statistic, capped at
+    one, could not fall below it)."""
+    rng = np.random.default_rng(24)
+    detected, above_one = 0, 0
+    reps = 20
+    for _ in range(reps):
+        c, o, z = _dominant_events(140, 4, 2.0, rng)
+        res = LinearResidualTest().run({"c": c}, o, z, 199, rng, np.arange(140), 0)
+        detected += float(np.mean(res.null[:, 0] >= res.observed[0])) < 0.05
+        above_one += np.any(res.null[:, 0] > 1.0)
+    assert above_one > 0          # draws past a perfect fit occur, and are kept
+    assert detected >= 0.8 * reps
+
+
+def test_the_linear_tier_holds_its_level_with_dominant_events():
+    rng = np.random.default_rng(25)
+    rejections, reps = 0, 300
+    for _ in range(reps):
+        c, o, z = _dominant_events(100, 3, 0.0, rng)
+        res = LinearResidualTest().run({"c": c}, o, z, 99, rng, np.arange(100), 0)
+        rejections += (1 + np.sum(res.null[:, 0] >= res.observed[0])) / 100 < 0.05
+    assert rejections / reps <= 0.08

@@ -82,6 +82,10 @@ class SelectionSample:
         relationship checks still use them.
     partialled_df : effective degrees of freedom of that removal, counted as
         conditioning variables in the power calculation.
+    clusters : cluster label of each row when the rows are grouped into
+        clusters of dependent samples (high-flow events; time_positions are
+        then cluster coordinates, statistics.significance.clusters); None
+        otherwise.
     """
     candidates: dict[str, np.ndarray]
     obs: np.ndarray
@@ -93,6 +97,7 @@ class SelectionSample:
     covariate_label: str | None = None
     partialled_covariates: np.ndarray | None = None
     partialled_df: float = 0.0
+    clusters: np.ndarray | None = None
 
 
 def partial_out_covariates(sample: SelectionSample) -> SelectionSample:
