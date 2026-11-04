@@ -123,12 +123,18 @@ def _dependence_flags(where: str, sources: list[tuple[str, dict | None]]) -> lis
     sources, prefixed by where (round and formulation)."""
     flags = []
     for what, dep in sources:
-        if dep and dep.get("crossfit_buffer_dropped_samples"):
-            flags.append({"code": "crossfit_buffer_dropped", "message": (
-                f"{where}, {what}: {dep['crossfit_buffer_dropped_samples']} "
-                "sample(s) were cross-fitted without the dependence-lag buffer, because too few samples lay "
-                "outside it; autocorrelation can leak between fitting and prediction, which may make the "
-                "test reject too often.")})
+        if dep and dep.get("crossfit_blocks_short"):
+            flags.append({"code": "crossfit_blocks_short", "message": (
+                f"{where}, {what}: the record spanned fewer than four dependence lags, so its cross-fitting "
+                "blocks were shorter than one lag, or a block's fit kept its neighbouring blocks for lack of "
+                "samples; dependence can leak between fitting and prediction, which may make the test reject "
+                "too often.")})
+        if dep and dep.get("low_rank_material"):
+            flags.append({"code": "low_rank_material", "message": (
+                f"{where}, {what}: a kernel factor reached the rank cap, and the cross-fitted residual sum of "
+                f"squares changed by {dep.get('low_rank_rank_change', 0.0):.2g} (relative) between half the "
+                "rank and the cap, so the effect size may still move by about twice that, as much as the "
+                "effect-size floor; raise SelectionConfig.nonlinear_rank (docs/methods.md, Nonlinear tier).")})
         if dep and not dep.get("estimated") and dep.get("few_blocks"):
             flags.append({"code": "few_blocks", "message": (
                 f"{where}, {what}: the samples are not on a regular time grid "
@@ -200,10 +206,14 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
     dependent_samples_permuted : in a step's CMI test, the samples exchanged
         by the local permutation were not indistinguishable from independent
         sampling (their decorrelation lag exceeded one sampling step).
-    crossfit_buffer_dropped : in a step's nonlinear test, some samples were
-        cross-fitted without the dependence-lag buffer (left out alone),
-        because too few samples lay outside it, so autocorrelation can leak
-        between fitting and prediction for those samples.
+    crossfit_blocks_short : in a step's nonlinear test or effect size, the
+        cross-fitting blocks were shorter than one dependence lag (record
+        spanning fewer than four lags), or a block's fit kept its neighbouring
+        blocks for lack of samples, so dependence can leak between fitting and
+        prediction.
+    low_rank_material : in a step's nonlinear test or effect size, a kernel
+        factor reached the rank cap and the approximation may move the effect
+        size by as much as the effect-size floor (half-rank check).
     formulation_missing_values : a formulation lacks values at timesteps
         where the observations have them, which removes those timesteps from
         the common basis of every series.
@@ -233,7 +243,7 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         power: the stop reflects too few samples, not an absence of
         information.
 
-    The resampling flags (few_blocks, crossfit_buffer_dropped,
+    The resampling flags (few_blocks, crossfit_blocks_short,
     dependent_samples_permuted, dependence_not_decaying) are raised for every
     step's tests and also for the test that led from each tier to the next,
     which is not part of the committed selection.

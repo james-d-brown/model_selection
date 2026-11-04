@@ -1360,3 +1360,40 @@ def test_partial_out_covariates_residualizes_every_series_and_reports_degrees_of
     g = np.sin(2 * np.pi * V[:, 1]) * 2 + V[:, 0] ** 2
     assert abs(np.corrcoef(res.obs, g)[0, 1]) < 0.2 < abs(np.corrcoef(O, g)[0, 1])
     assert partial_out_covariates(SelectionSample({"c": C}, O, np.arange(100), 1)).covariates is None
+
+
+def test_kernel_escalation_tests_on_pivoted_cholesky_factors_match_the_exact_kernels():
+    """Beyond the rank cap the two kernel escalation tests use pivoted-Cholesky
+    factors through their thin spectra. With the factors below the kernels'
+    numerical rank they equal the kernels, and the tests reproduce the exact
+    path: statistics, effect sizes, block lengths and, for the same seed,
+    p-values."""
+    import numpy as np
+    from model_selection.statistics.adequacy.specification import linear_specification_test
+    from model_selection.statistics.adequacy.state_independence import StateIndependenceTest
+    from model_selection.statistics.regression import kernel_residuals as kr
+    rng = np.random.default_rng(0)
+    n = 300
+    t = np.arange(n, dtype=float)
+    s = np.cumsum(rng.standard_normal(n)) * 0.05
+    z = np.column_stack([np.sin(2 * np.pi * t / 100), np.sin(s)])
+    c = s + 0.5 * rng.standard_normal(n)
+    o = 0.8 * z[:, 1] + 0.5 * z[:, 0] + 0.3 * c + 0.3 * rng.standard_normal(n)
+    w = np.cos(t / 40)[:, None]
+
+    def run():
+        spec = linear_specification_test(np.column_stack([c, o]), z, 0.05, 0.02, 99, np.random.default_rng(5), t, 4,
+                                          n_candidate_columns=1, grid_step=1.0, max_n=5000, interaction_with=w)
+        eff = StateIndependenceTest(max_n=5000).run(c, o, z, time_positions=t, min_temporal_lag=4,
+                                                    n_permutations=99, rng=np.random.default_rng(7), grid_step=1.0)
+        return (spec.p_value, spec.semipartial_effect_size, spec.block_length,
+                eff.permutation_p_value, eff.observed_statistic, eff.semipartial_effect_size)
+    try:
+        kr.set_low_rank(None)
+        exact = run()
+        kr.set_low_rank(n - 1)
+        factored = run()
+    finally:
+        kr.set_low_rank(kr.DEFAULT_RANK_CAP)
+    assert exact[0] == factored[0] and exact[2] == factored[2] and exact[3] == factored[3]
+    assert np.allclose([exact[1], exact[4], exact[5]], [factored[1], factored[4], factored[5]], rtol=1e-6)

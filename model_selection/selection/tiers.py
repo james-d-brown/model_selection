@@ -153,19 +153,20 @@ def effect_size_floor_for_tier(effect_size_floor: float, tier: str) -> float:
     raise ValueError(f"tier must be one of {TIERS} -- got {tier!r}")
 
 
-def _effect_modification_check(a: AdequacyConfig, floor: float, run_length: int, plot) -> AdequacyCheck:
+def _effect_modification_check(a: AdequacyConfig, floor: float, run_length: int, plot, max_n: int) -> AdequacyCheck:
     """The candidate effect-modification test (linear and nonlinear tiers):
     does the candidate's relationship with the observations vary with the
     selected formulations' state? Both tiers' statistics average over states,
-    so an interaction whose direction changes across states can cancel them."""
+    so an interaction whose direction changes across states can cancel them.
+    max_n is the shared kernel sample cap (SelectionConfig.nonlinear_max_n)."""
     return AdequacyCheck(
         "effect modification by the selected formulations",
         make_state_independence_adequacy_test(alpha=a.alpha, effect_size_floor=floor, ridge_lambda=a.ridge_lambda,
-                                              max_n=a.kernel_check_max_n, run_length=run_length),
+                                              max_n=max_n, run_length=run_length),
         plot, needs_conditioning=True, stage="relationship")
 
 
-def _specification_check(a: AdequacyConfig, floor: float, run_length: int) -> AdequacyTestFunc:
+def _specification_check(a: AdequacyConfig, floor: float, run_length: int, max_n: int) -> AdequacyTestFunc:
     def _check(candidate, obs, conditioning, n_permutations=100, rng=None, time_positions=None,
                min_temporal_lag=0, column_labels=None, grid_step=None, interaction_with=None):
         columns = np.column_stack([as2d(candidate), as2d(obs)])
@@ -173,7 +174,7 @@ def _specification_check(a: AdequacyConfig, floor: float, run_length: int) -> Ad
             columns, conditioning, a.alpha, floor, n_permutations,
             rng or np.random.default_rng(), time_positions if time_positions is not None else np.arange(len(columns)),
             min_temporal_lag, column_labels=column_labels, run_length=run_length, grid_step=grid_step,
-            n_candidate_columns=as2d(candidate).shape[1], max_n=a.kernel_check_max_n,
+            n_candidate_columns=as2d(candidate).shape[1], max_n=max_n,
             interaction_with=interaction_with,
         )
     return _check
@@ -195,6 +196,7 @@ def build_tier(
     plot = (lambda kind: plot_factory(kind, name)) if plot_factory else (lambda kind: None)
     adequacy_floor = a.resolved_effect_size_floor(selection) if a is not None else None
     run = selection.dependence_run_length
+    cap = selection.nonlinear_max_n  # shared kernel sample cap
     if name == "linear":
         tier = Tier("linear", LinearResidualTest(run_length=run), floor,
                     structural_check=partial_cca_structural_adequacy)
@@ -208,12 +210,12 @@ def build_tier(
                                                         run_length=run)
                 kind = "linearity"
             tier.adequacy_checks = [
-                AdequacyCheck("nonlinear dependence on the selected formulations", _specification_check(a, adequacy_floor, run),
+                AdequacyCheck("nonlinear dependence on the selected formulations", _specification_check(a, adequacy_floor, run, cap),
                               plot("linear_specification"), needs_conditioning=True, stage="removal",
                               labels_columns=True),
                 AdequacyCheck("nonlinear candidate-observation relation", residual, plot(kind),
                               stage="relationship"),
-                _effect_modification_check(a, adequacy_floor, run, plot("state_independence")),
+                _effect_modification_check(a, adequacy_floor, run, plot("state_independence"), cap),
             ]
         else:
             tier.diagnostic_plots = [p for p in (plot("linear_specification"),
@@ -223,7 +225,7 @@ def build_tier(
     elif name == "nonlinear":
         tier = Tier("nonlinear", NonlinearResidualTest(run_length=run), floor)
         if a is not None:
-            tier.adequacy_checks = [_effect_modification_check(a, adequacy_floor, run, plot("state_independence"))]
+            tier.adequacy_checks = [_effect_modification_check(a, adequacy_floor, run, plot("state_independence"), cap)]
         else:
             tier.diagnostic_plots = [p for p in (plot("state_independence"),) if p is not None]
     elif name == "cmi":

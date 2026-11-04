@@ -45,6 +45,29 @@ from model_selection.utils import as2d
 logger = logging.getLogger(__name__)
 
 
+def _with_effect_diagnostics(dependence: dict | None, test, candidate, effect_size_floor: float) -> dict | None:
+    """The test's dependence record, with the regression diagnostics of the
+    winner's effect size merged in (nonlinear tier): a short cross-fitting
+    record, or a factor at the rank cap, in either regression counts. The
+    low-rank approximation is material when the residual sums of squares may
+    still change by a fraction eps with rank (rank_change): the effect size, one
+    minus a ratio of them, may then move by about 2 eps, which is material
+    when that reaches the effect-size floor. A capped feature factor is
+    material whenever it occurs."""
+    if dependence is None:
+        return None
+    out = dict(dependence)
+    extra = getattr(test, "magnitude_diagnostics", {}).get(id(candidate))
+    if extra:
+        out["crossfit_blocks_short"] = bool(out.get("crossfit_blocks_short")) or extra["crossfit_blocks_short"]
+        for key in ("low_rank_cap_share", "low_rank_rank_change"):
+            out[key] = max(float(out.get(key, 0.0)), extra[key])
+    if "low_rank_rank_change" in out:
+        out["low_rank_material"] = bool(2.0 * out["low_rank_rank_change"] >= effect_size_floor
+                                        or out.get("feature_factor_cap_share", 0.0) > 0)
+    return out
+
+
 @dataclass
 class SelectionStep:
     """One tested winner.
@@ -279,15 +302,25 @@ def greedy_forward_selection(
         # statistic's; in the nonlinear tier it is a different quantity
         # (docs/methods.md, Acceptance test).
         null_max = result.null.max(axis=1)
-        effects = {}
-        for k, nm in enumerate(result.names):
-            effects[nm] = tier.test.magnitude(candidates[nm], obs, z, time_positions, lag,
-                                              float(result.observed[k]), result.null[:, k],
-                                              grid_step=sample.grid_step)
-        if round_no == 1:
-            unconditional_effect = {nm: float(e[0]) for nm, e in effects.items()}
         significant = [nm for k, nm in enumerate(result.names)
                        if permutation_p_value(float(result.observed[k]), null_max) < alpha]
+        # Effect sizes are needed only for the candidates that can win: the
+        # significant ones when there are any. Round 1 computes every
+        # candidate's, for the report of each formulation on its own.
+        ranked = result.names if (round_no == 1 or not significant) else significant
+        from model_selection.parallel import parallel_map
+
+        def effect_of(nm):
+            k = result.index(nm)
+            return tier.test.magnitude(candidates[nm], obs, z, time_positions, lag, float(result.observed[k]),
+                                       result.null[:, k], grid_step=sample.grid_step)
+        if hasattr(tier.test, "magnitudes"):
+            # The test pools the eigendecompositions of all these effect sizes (nonlinear tier).
+            effects = tier.test.magnitudes({nm: candidates[nm] for nm in ranked}, obs, z, time_positions, lag)
+        else:
+            effects = dict(zip(ranked, parallel_map(effect_of, ranked)))
+        if round_no == 1:
+            unconditional_effect = {nm: float(e[0]) for nm, e in effects.items()}
         winner = max(significant or result.names, key=lambda nm: (effects[nm][0], nm))
         w = result.index(winner)
         winner_values = candidates[winner]
@@ -389,7 +422,8 @@ def greedy_forward_selection(
         trajectory.append(SelectionStep(
             formulation=winner, association=float(result.observed[w]), p_value=p_value, accepted=accepted, tier=tier.name,
             n_selected_before=len(selected), n_candidates_tested=len(remaining), dependence_lag=lag,
-            block_length=result.block_length, dependence=result.dependence,
+            block_length=result.block_length,
+            dependence=_with_effect_diagnostics(result.dependence, tier.test, winner_values, tier.effect_size_floor),
             null_mean=float(np.mean(null_column)), null_std=float(np.std(null_column, ddof=1)),
             effect=bias_corrected,
             magnitude_unsubstantiated=magnitude_unsubstantiated,

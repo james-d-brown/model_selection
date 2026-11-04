@@ -28,9 +28,17 @@ Tibshirani, 1989), which reduces to the HC2 correction for least squares.
 Without it the null is too narrow and the test rejects far too often on
 multivariate samples.
 
-Limitations: kernel ridge is O(n^3), so large samples are subsampled once,
-dependence-aware, before testing; and only the conditional mean is tested,
-not Z-dependent variance.
+Beyond the rank cap each kernel (K_z, K_main, K_main + K_int, K_int) is a
+pivoted-Cholesky factor, used through its thin spectrum
+(regression.kernel_residuals); the statistic, the penalties, the effect sizes
+and every bootstrap draw use the same factors, so an approximation at the cap
+changes which departures the test is most sensitive to, not its calibration.
+Below the cap every quantity is the one computed from the kernels' full
+eigendecompositions.
+
+Limitations: samples longer than the shared kernel sample cap
+(SelectionConfig.nonlinear_max_n) are subsampled once, evenly, before
+testing; and only the conditional mean is tested, not Z-dependent variance.
 
 See docs/methods.md, Nonlinear tier.
 """
@@ -45,14 +53,27 @@ from model_selection.statistics.adequacy.base import (
     as_adequacy_test,
 )
 from model_selection.statistics.adequacy.kernels import (
-    median_heuristic_bandwidth,
+    kernel_spectrum,
+    project,
     rbf_kernel,
     reml_lambda_from_spectrum,
     variance_shares,
 )
+from model_selection.statistics.regression.kernel_residuals import _median_bandwidth, _rbf_column, _use_low_rank
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH
 from model_selection.statistics.significance.resampling import grid_subsample
 from model_selection.utils import as2d
+
+
+def _scaled_inputs(candidate: np.ndarray, conditioning: np.ndarray):
+    """(candidate, standardized conditioning set, their median-heuristic
+    bandwidths)."""
+    Z = as2d(conditioning)
+    z_std = Z.std(axis=0, ddof=1)
+    z_std_safe = np.where(z_std > 0, z_std, 1.0)
+    Z_scaled = (Z - Z.mean(axis=0)) / z_std_safe
+    candidate_2d = as2d(candidate)
+    return candidate_2d, Z_scaled, _median_bandwidth(candidate_2d), _median_bandwidth(Z_scaled)
 
 
 def kernel_main_effect_kernels(
@@ -62,38 +83,55 @@ def kernel_main_effect_kernels(
     conditioning set (K_z), each with a median-heuristic bandwidth. Candidate
     may be scalar or multivariate.
     """
-    Z = as2d(conditioning)
-    z_std = Z.std(axis=0, ddof=1)
-    z_std_safe = np.where(z_std > 0, z_std, 1.0)
-    Z_scaled = (Z - Z.mean(axis=0)) / z_std_safe
-    candidate_2d = as2d(candidate)
-    bw_c = median_heuristic_bandwidth(candidate_2d)
-    bw_z = median_heuristic_bandwidth(Z_scaled)
-    K_c = rbf_kernel(candidate_2d, bw_c)
-    K_z = rbf_kernel(Z_scaled, bw_z)
-    return K_c, K_z
+    candidate_2d, Z_scaled, bw_c, bw_z = _scaled_inputs(candidate, conditioning)
+    return rbf_kernel(candidate_2d, bw_c), rbf_kernel(Z_scaled, bw_z)
 
 
 def interaction_spectra(candidate: np.ndarray, conditioning: np.ndarray) -> dict:
-    """The kernels of the interaction test and the eigendecompositions of its
-    null (K_main = K_c + K_z) and augmented (K_main + K_int) kernels. They
-    depend on the candidate and the conditioning set only, so one computation
-    serves the observed statistic and every resampled one."""
-    K_c, K_z = kernel_main_effect_kernels(as2d(candidate), conditioning)
-    K_main = K_c + K_z
-    K_int = K_c * K_z  # Hadamard product -- the interaction kernel
-    e_z, V_z = np.linalg.eigh(K_z)
-    e_main, V_main = np.linalg.eigh(K_main)
-    e_full, V_full = np.linalg.eigh(K_main + K_int)
-    return {"K_int": K_int, "z": (np.clip(e_z, 0.0, None), V_z), "main": (np.clip(e_main, 0.0, None), V_main),
-            "full": (np.clip(e_full, 0.0, None), V_full)}
+    """The spectra (eigenvalues, eigenvectors, cap share) of the conditioning
+    kernel K_z, the null kernel K_main = K_c + K_z and the augmented kernel
+    K_main + K_int, and a function applying the interaction kernel
+    K_int = K_c * K_z (Hadamard product). They depend on the candidate and the
+    conditioning set only, so one computation serves the observed statistic
+    and every resampled one. Within the rank cap they come from the full
+    kernels; beyond it from pivoted-Cholesky factors, computed as parallel
+    tasks."""
+    from model_selection.parallel import run_tasks
+    candidate_2d, Z_scaled, bw_c, bw_z = _scaled_inputs(as2d(candidate), conditioning)
+    n = candidate_2d.shape[0]
+    if not _use_low_rank(n):
+        K_c, K_z = rbf_kernel(candidate_2d, bw_c), rbf_kernel(Z_scaled, bw_z)
+        K_int = K_c * K_z
+        z, main, full = run_tasks([lambda: kernel_spectrum(n, None, None, lambda: K_z),
+                                   lambda: kernel_spectrum(n, None, None, lambda: K_c + K_z),
+                                   lambda: kernel_spectrum(n, None, None, lambda: K_c + K_z + K_int)])
+        return {"apply_int": lambda R: K_int @ R, "z": z, "main": main, "full": full}
+    col_c = _rbf_column(candidate_2d, (candidate_2d ** 2).sum(1), bw_c)
+    col_z = _rbf_column(Z_scaled, (Z_scaled ** 2).sum(1), bw_z)
+    ones = np.ones(n)
+    z, main, full, inter = run_tasks([
+        lambda: kernel_spectrum(n, ones, col_z, None),
+        lambda: kernel_spectrum(n, 2 * ones, lambda p: col_c(p) + col_z(p), None),
+        lambda: kernel_spectrum(n, 3 * ones, lambda p: col_c(p) + col_z(p) + col_c(p) * col_z(p), None),
+        lambda: kernel_spectrum(n, ones, lambda p: col_c(p) * col_z(p), None),
+    ])
+    e_i, V_i, _ = inter
+    return {"apply_int": lambda R: V_i @ (e_i[:, None] * (V_i.T @ R)), "z": z, "main": main, "full": full}
 
 
-def _ridge_residuals(spectrum: tuple[np.ndarray, np.ndarray], y: np.ndarray, ridge_lambda: float) -> np.ndarray:
+def _ridge_residuals(spectrum: tuple, y: np.ndarray, ridge_lambda: float) -> np.ndarray:
     """Residuals of kernel ridge regression of centred y on K = V diag(e) V':
-    y - K (K + lambda I)^-1 y = V diag(lambda / (e + lambda)) V' y."""
-    e, V = spectrum
-    return V @ ((ridge_lambda / (e + ridge_lambda))[:, None] * (V.T @ y))
+    y - K (K + lambda I)^-1 y = y - V diag(e / (e + lambda)) V' y (V may be a
+    thin basis)."""
+    e, V = spectrum[0], spectrum[1]
+    return y - V @ ((e / (e + ridge_lambda))[:, None] * (V.T @ y))
+
+
+def _reml(spectrum: tuple, y: np.ndarray) -> float:
+    """REML penalty of kernel ridge regression of centred y on the kernel."""
+    e, V = spectrum[0], spectrum[1]
+    P, outside = project(V, y)
+    return reml_lambda_from_spectrum(e, P, n_total=y.shape[0], null_energy=outside)
 
 
 def kernel_interaction_score_statistic(
@@ -130,18 +168,15 @@ def kernel_interaction_score_statistic(
 
     fixed_lambda = ridge_lambda
     if ridge_lambda is None:
-        e_main, V_main = spectra["main"]
-        ridge_lambda = reml_lambda_from_spectrum(e_main, V_main.T @ obs_c)
+        ridge_lambda = _reml(spectra["main"], obs_c)
 
     resid_null = _ridge_residuals(spectra["main"], obs_c, ridge_lambda)
-    e_z, V_z = spectra["z"]
-    proj_z = V_z.T @ obs_c
     if lambda_z is None:
-        lambda_z = fixed_lambda if fixed_lambda is not None else reml_lambda_from_spectrum(e_z, proj_z)
+        lambda_z = fixed_lambda if fixed_lambda is not None else _reml(spectra["z"], obs_c)
     resid_z = _ridge_residuals(spectra["z"], obs_c, lambda_z)
 
     # trace(r' K_int r) without forming the (q, q) matrix
-    score = float(np.sum(resid_null * (spectra["K_int"] @ resid_null)))
+    score = float(np.sum(resid_null * spectra["apply_int"](resid_null)))
     score = max(score, 0.0)
 
     resid_aug = _ridge_residuals(spectra["full"], obs_c, ridge_lambda)
@@ -160,8 +195,8 @@ class StateIndependenceTest(FunctionalFormTest):
     REML on the observed data, once per test, and holds them fixed in every
     draw (module docstring). The kernels and their eigendecompositions
     depend only on the candidate and the conditioning set, so they are
-    computed once per test (O(n^3)) and each draw costs O(n^2). max_n caps the
-    sample used.
+    computed once per test, and each draw costs O(n m) for spectra of m
+    components. max_n caps the sample used (the shared kernel sample cap).
     """
 
     _supports_multivariate = True
@@ -203,9 +238,7 @@ class StateIndependenceTest(FunctionalFormTest):
         spectra = self._spectra(candidate, conditioning)
         obs_2d = as2d(obs)
         obs_c = obs_2d - obs_2d.mean(axis=0)
-        e_main, V_main = spectra["main"]
-        e_z, V_z = spectra["z"]
-        return reml_lambda_from_spectrum(e_main, V_main.T @ obs_c), reml_lambda_from_spectrum(e_z, V_z.T @ obs_c)
+        return _reml(spectra["main"], obs_c), _reml(spectra["z"], obs_c)
 
     def _compute_statistic(
             self, candidate: np.ndarray, obs: np.ndarray, conditioning: np.ndarray | None,
@@ -239,10 +272,15 @@ class StateIndependenceTest(FunctionalFormTest):
         if conditioning is None or np.asarray(conditioning).size == 0:
             return np.full(n, 1.0 / n)  # residuals about the mean
         lam, _ = self._penalties(candidate, obs, conditioning)
-        e, V = self._spectra(candidate, conditioning)["main"]
-        M = (V * (lam / (e + lam))) @ V.T
-        R = M - M.mean(axis=1, keepdims=True)  # M applied after centring: M (I - 11'/n)
-        return 1.0 - np.sum(R * R, axis=1)
+        e, V = self._spectra(candidate, conditioning)["main"][:2]
+        # Residual maker after centring, R = (I - H)(I - 11'/n) with H = V diag(d) V':
+        # diag(R R') = diag(C) - 2 diag(H C) + diag(H C H), from V in O(n m).
+        d = e / (e + lam)
+        h1 = V @ (d * V.sum(axis=0))                 # H 1
+        diag_h = (V ** 2) @ d
+        diag_hh = (V ** 2) @ (d ** 2)
+        diag_rr = (1.0 - 1.0 / n) - 2.0 * (diag_h - h1 / n) + (diag_hh - h1 ** 2 / n)
+        return 1.0 - diag_rr
 
     def run(
             self,

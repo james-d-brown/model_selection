@@ -13,6 +13,7 @@ dependencies = [
     "pyarrow",
     "plotly",
     "dataretrieval",
+    "threadpoolctl",
 ]
 
 [project.optional-dependencies]

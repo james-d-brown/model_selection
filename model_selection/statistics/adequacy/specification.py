@@ -24,8 +24,14 @@ the statistic's per-sample terms r_t (K r)_t. The effect size is the share of
 the residuals' variation that a kernel ridge regression on Z explains
 (penalty by restricted maximum likelihood), bias-corrected by its mean over
 the null draws. On long records the test runs on max_n evenly spaced points
-(grid_subsample), because the kernel is n x n; the bootstrap accounts for
-the dependence that remains between them.
+(grid_subsample; the shared kernel sample cap, SelectionConfig.nonlinear_max_n);
+the bootstrap accounts for the dependence that remains between them. Beyond
+the rank cap the radial basis function kernel is a pivoted-Cholesky factor
+(regression.kernel_residuals), used through its thin spectrum: the statistic,
+the penalty, the effect size and every bootstrap draw use the same factor, so
+an approximation at the cap changes which departures the test is most
+sensitive to, not its calibration. Below the cap every quantity is the one
+computed from the kernel's full eigendecomposition.
 
 A column rejects when its p-value is below alpha divided by the number of
 columns tested (Bonferroni) and its bias-corrected effect reaches the
@@ -38,9 +44,10 @@ from __future__ import annotations
 import numpy as np
 
 from model_selection.statistics.adequacy.base import AdequacyTestOutcome
-from model_selection.statistics.adequacy.kernels import median_heuristic_bandwidth, rbf_kernel, reml_lambda_from_spectrum
+from model_selection.statistics.adequacy.kernels import (
+    kernel_spectrum, project, rbf_kernel, reml_lambda_from_spectrum)
 from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights
-from model_selection.statistics.regression.kernel_residuals import standardize
+from model_selection.statistics.regression.kernel_residuals import _median_bandwidth, _rbf_column, standardize
 from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH, resolve_block
 from model_selection.statistics.significance.resampling import grid_subsample
@@ -52,13 +59,14 @@ DRAW_CHUNK = 128  # bootstrap draws processed at a time
 def _kernel_scores(R: np.ndarray, eigvals: np.ndarray, V: np.ndarray, lam: float) -> tuple[np.ndarray, np.ndarray]:
     """For residual vectors in the columns of R (n, m): the score r'Kr / r'r
     and the share of r's variation explained by the kernel ridge fit on K
-    with penalty lam, from K's eigendecomposition."""
-    P = V.T @ R
-    total = np.sum(P ** 2, axis=0)
+    with penalty lam, from K's spectrum (V may be a thin basis: the part of r
+    outside it is left unexplained)."""
+    P, outside = project(V, R)
+    total = np.sum(P ** 2, axis=0) + outside
     total = np.where(total > 0, total, 1.0)
     score = (eigvals[:, None] * P ** 2).sum(axis=0) / total
-    left = ((lam / (eigvals + lam))[:, None] * P) ** 2
-    share = 1.0 - left.sum(axis=0) / total
+    left = (((lam / (eigvals + lam))[:, None] * P) ** 2).sum(axis=0) + outside
+    share = 1.0 - left / total
     return score, np.clip(share, 0.0, 1.0)
 
 
@@ -120,22 +128,39 @@ def linear_specification_test(
     Q, _ = np.linalg.qr(design)
     hc2 = 1.0 / np.sqrt(np.clip(1.0 - np.sum(Q ** 2, axis=1), 1e-12, None))
     Zs = standardize(Z)
-    kernels = [("curvature", rbf_kernel(Zs, median_heuristic_bandwidth(Zs)))]
+    bw = _median_bandwidth(Zs)
+    sq = (Zs ** 2).sum(1)
+    rbf = _rbf_column(Zs, sq, bw)
+    # Each kernel's spectrum: the full eigendecomposition within the rank cap,
+    # else a pivoted-Cholesky factor's thin spectrum. The interaction kernel,
+    # a product of linear kernels, has an exact factor of k_z * k_w columns.
+    spectra = [("curvature", lambda: kernel_spectrum(n, np.ones(n), rbf, lambda: rbf_kernel(Zs, bw)))]
     if W_int is not None:
-        kernels.append(("interaction", (Zs @ Zs.T) * (standardize(W_int) @ standardize(W_int).T)))
+        Ws = standardize(W_int)
+
+        def interaction_spectrum():
+            F = (Zs[:, :, None] * Ws[:, None, :]).reshape(n, -1)
+            if F.shape[1] >= n:
+                e, V = np.linalg.eigh(F @ F.T)
+                return np.clip(e, 0.0, None), V, 0.0
+            U, sv, _ = np.linalg.svd(F, full_matrices=False)
+            return sv ** 2, U, 0.0
+        spectra.append(("interaction", interaction_spectrum))
+    from model_selection.parallel import run_tasks
+    kernels = [(part, sp) for (part, _), sp in zip(spectra, run_tasks([f for _, f in spectra]))]
     blocks = []
 
-    def column_outcomes(K_raw, level):
-        eigvals, V = np.linalg.eigh(K_raw)
-        eigvals = np.clip(eigvals, 0.0, None)
-        K = (V * eigvals) @ V.T
+    def column_outcomes(spectrum, level):
+        eigvals, V, _ = spectrum
         found = []
         for j in range(Y.shape[1]):
             y = Y[:, j]
             resid = y - Q @ (Q.T @ y)
-            lam = reml_lambda_from_spectrum(eigvals, (V.T @ resid)[:, None])
+            P, outside = project(V, resid[:, None])
+            lam = reml_lambda_from_spectrum(eigvals, P, n_total=n, null_energy=outside)
             observed, semipartial = (float(v[0]) for v in _kernel_scores(resid[:, None], eigvals, V, lam))
-            resolved = resolve_block(time_positions, min_temporal_lag, [(resid, K @ resid)], run_length, grid_step)
+            K_resid = V @ (eigvals * P[:, 0])
+            resolved = resolve_block(time_positions, min_temporal_lag, [(resid, K_resid)], run_length, grid_step)
             blocks.append(resolved)
             null_stats = np.empty(n_permutations)
             null_semi = np.empty(n_permutations)
@@ -151,7 +176,7 @@ def linear_specification_test(
         return found
 
     level = alpha / len(kernels) / Y.shape[1]
-    by_part = [(part, column_outcomes(K_raw, level)) for part, K_raw in kernels]
+    by_part = [(part, column_outcomes(spectrum, level)) for part, spectrum in kernels]
     # A column's outcome: its departing part if any (the smaller p-value first), else its smallest p-value.
     outcomes, parts = [], []
     for j in range(Y.shape[1]):

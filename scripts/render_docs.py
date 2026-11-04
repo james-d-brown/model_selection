@@ -67,6 +67,18 @@ COLUMN_WIDTHS = {
 }
 
 
+def github_slug(value: str, separator: str = "-") -> str:
+    """Heading anchors as GitHub makes them, so that links in the Markdown work on
+    GitHub and in the HTML alike: lowercase, punctuation removed, each space a hyphen."""
+    return re.sub(r"[^\w\- ]", "", value.strip().lower()).replace(" ", separator)
+
+
+def github_repeats(html: str) -> str:
+    """Repeated headings numbered as GitHub numbers them (-1, -2, ...), not as
+    Python-Markdown does (_1, _2, ...)."""
+    return re.sub(r'((?:id|href)="#?[\w-]+)_(\d+)"', r'\1-\2"', html)
+
+
 def set_column_widths(body: str) -> str:
     """Wrap every table in a scrolling box and give the recurring layouts fixed
     column widths, so wide text columns are not squeezed by long code names."""
@@ -157,9 +169,11 @@ def render(src: Path, dst: Path, title: str, toc: bool) -> None:
     text = re.sub(r"```(?:math|latex)\n(.*?)\n```", hold, text, flags=re.S)
     text = re.sub(r"(?<![\\$])\$([^$\n]+?)\$", hold_inline, text)
     # Links between the rendered documents point at the HTML versions.
-    text = re.sub(r"\]\((docs/)?methods\.md\)", lambda m: "](" + (m.group(1) or "") + "methods.html)", text)
-    md = markdown.Markdown(extensions=["tables", "fenced_code", "toc", "sane_lists"])
-    body = md.convert(text)
+    text = re.sub(r"\]\((docs/)?methods\.md(#[^)]*)?\)",
+                  lambda m: "](" + (m.group(1) or "") + "methods.html" + (m.group(2) or "") + ")", text)
+    from markdown.extensions.toc import TocExtension
+    md = markdown.Markdown(extensions=["tables", "fenced_code", TocExtension(slugify=github_slug), "sane_lists"])
+    body = github_repeats(md.convert(text))
     for i, eq in enumerate(equations):
         body = body.replace(f"<p>EQUATION{i}PLACEHOLDER</p>", eq)
     for i, eq in reversed(list(enumerate(inline))):
@@ -173,7 +187,7 @@ def render(src: Path, dst: Path, title: str, toc: bool) -> None:
         return f'src="data:image/svg+xml;base64,{data}"'
     body = re.sub(r'src="([^":]+\.svg)"', embed, body)
     body = set_column_widths(body)
-    toc_html = md.toc
+    toc_html = github_repeats(md.toc)
     if toc:
         body, toc_html = number_headings(body, toc_html)
     contents = f'<nav class="toc"><strong>Contents</strong>{toc_html}</nav>' if toc else ""

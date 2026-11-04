@@ -37,19 +37,30 @@ def kernel_ridge_fit(K: np.ndarray, y_centered: np.ndarray, ridge_lambda: float)
 
 def reml_lambda_from_spectrum(
         eigvals: np.ndarray, proj: np.ndarray, bounds: tuple[float, float] = (1e-6, 1e6),
+        n_total: int | None = None, null_energy: np.ndarray | None = None,
 ) -> float:
     """REML ridge penalty (see reml_kernel_ridge_lambda) from K's eigenvalues
-    and the data projected on K's eigenvectors, proj = V' y (n, q)."""
+    and the data projected on K's eigenvectors, proj = V' y (m, q).
+
+    With a thin basis (m < n eigenvectors, the rest of K's spectrum zero, as
+    for a low-rank factor), n_total is n and null_energy the squared norm of
+    each column of y outside the basis, ||y||^2 - ||V' y||^2; the n - m zero
+    eigenvalues then enter the likelihood as they would with the full
+    eigendecomposition. Without them the basis is taken to be complete."""
     from scipy.optimize import minimize_scalar
 
     eigvals = np.clip(eigvals, 0.0, None)
-    n, q = proj.shape
+    m, q = proj.shape
+    n = m if n_total is None else int(n_total)
+    d0 = n - m
+    null = np.zeros(q) if null_energy is None else np.clip(np.asarray(null_energy, dtype=float).ravel(), 0.0, None)
 
     def _profile_negative_log_likelihood(log_lam: float) -> float:
-        denom = eigvals + np.exp(log_lam)
-        total = q * np.sum(np.log(denom))
+        lam = np.exp(log_lam)
+        denom = eigvals + lam
+        total = q * (np.sum(np.log(denom)) + d0 * log_lam)
         for j in range(q):
-            quad = np.sum(proj[:, j] ** 2 / denom)
+            quad = np.sum(proj[:, j] ** 2 / denom) + (null[j] / lam if d0 else 0.0)
             if quad > 0:
                 total += n * np.log(quad)
         return total
@@ -57,6 +68,28 @@ def reml_lambda_from_spectrum(
     result = minimize_scalar(_profile_negative_log_likelihood, bounds=(np.log(bounds[0]), np.log(bounds[1])),
                              method="bounded")
     return float(np.exp(result.x))
+
+
+def kernel_spectrum(n: int, diag: np.ndarray, column, exact) -> tuple[np.ndarray, np.ndarray, float]:
+    """(eigenvalues e, eigenvectors V, cap share) of a kernel for the kernel
+    score tests: the full eigendecomposition of exact() when n is within the
+    rank cap, else the thin spectrum of its pivoted-Cholesky factor G (K ~ G
+    G' = V diag(e) V'), with its cap share (regression.kernel_residuals)."""
+    from model_selection.statistics.regression.kernel_residuals import _use_low_rank, low_rank, pivoted_cholesky
+    if not _use_low_rank(n):
+        e, V = np.linalg.eigh(exact())
+        return np.clip(e, 0.0, None), V, 0.0
+    G, share = pivoted_cholesky(diag, column, low_rank(), kind="escalation test")
+    U, sv, _ = np.linalg.svd(G, full_matrices=False)
+    e = sv ** 2
+    keep = e > max(float(e.max()), 0.0) * n * np.finfo(float).eps
+    return e[keep], U[:, keep], share
+
+
+def project(V: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(V' Y, squared norm of each column of Y outside V's span)."""
+    P = V.T @ Y
+    return P, np.clip(np.sum(Y ** 2, axis=0) - np.sum(P ** 2, axis=0), 0.0, None)
 
 
 def reml_kernel_ridge_lambda(

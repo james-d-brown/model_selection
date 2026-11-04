@@ -273,6 +273,28 @@ def trace_autocovariance(P: np.ndarray, grid_index: np.ndarray, length: int) -> 
         return np.where(count > 0, total / count, 0.0) * (1.0 - k / length)
 
 
+def trace_autocovariance_features(F: np.ndarray, grid_index: np.ndarray, length: int,
+                                  chunk: int = 256) -> np.ndarray:
+    """trace_autocovariance from the (centred) per-sample vectors themselves,
+    rows of F, instead of their inner products: the same function, computed
+    by fast Fourier transforms of the vectors placed on their grid, so that
+    no n x n matrix is formed."""
+    max_lag = searched_lags(length)
+    nfft = 1 << int(np.ceil(np.log2(2 * length)))
+    power = np.zeros(nfft // 2 + 1)
+    for j in range(0, F.shape[1], chunk):
+        X = np.zeros((length, min(chunk, F.shape[1] - j)))
+        X[grid_index] = F[:, j:j + chunk]
+        power += (np.abs(np.fft.rfft(X, n=nfft, axis=0)) ** 2).sum(axis=1)
+    total = np.fft.irfft(power, n=nfft)[:max_lag + 1]
+    ind = np.zeros(length)
+    ind[grid_index] = 1.0
+    count = np.rint(np.fft.irfft(np.abs(np.fft.rfft(ind, n=nfft)) ** 2, n=nfft)[:max_lag + 1])
+    k = np.arange(max_lag + 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(count > 0, total / np.maximum(count, 1), 0.0) * (1.0 - k / length)
+
+
 def _caller_lag_block(time_positions: np.ndarray, fallback_lag: float) -> "ResolvedBlock":
     """Block of the caller's dependence lag for samples not on a regular
     grid (event samples). n_blocks is the samples' time span divided by the
@@ -297,15 +319,18 @@ def resolve_block_from_inner_products(
     centred inner products <u_i, u_j>: the largest Politis–White estimate
     over the candidates, from the trace autocovariance (trace_autocovariance),
     when the samples lie on a regular grid; otherwise the caller's
-    dependence lag."""
+    dependence lag. An item may instead be a callable returning the centred
+    vectors u_i as rows, so that no n x n matrix is formed
+    (trace_autocovariance_features)."""
     n_samples = int(np.asarray(time_positions).size)
     layout = grid_layout(time_positions, grid_step) if inner_products else None
     if layout is None:
         return _caller_lag_block(time_positions, fallback_lag)
     step, gi, length = layout
     n = gi.size
-    estimates = [dependence_from_autocovariance(trace_autocovariance(P, gi, length), length, n, run_length)
-                 for P in inner_products]
+    estimates = [dependence_from_autocovariance(
+        trace_autocovariance_features(P(), gi, length) if callable(P) else trace_autocovariance(P, gi, length),
+        length, n, run_length) for P in inner_products]
     if not all(e.assessed for e in estimates):
         return ResolvedBlock(int(round(max(fallback_lag, 0))), estimated=False, n_samples=n_samples,
                              too_few_to_assess=n < MIN_ACF_N)

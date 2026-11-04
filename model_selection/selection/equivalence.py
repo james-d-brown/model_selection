@@ -68,6 +68,7 @@ import logging
 
 import numpy as np
 
+from model_selection.parallel import parallel_map
 from model_selection.selection.greedy import SelectionResult, _stack_selected, escalated_from_text
 from model_selection.selection.tiers import SelectionSample, Tier
 from model_selection.statistics.power import format_share, minimum_detectable_r2
@@ -182,17 +183,20 @@ def information_equivalence(
         z = ctx.z(before)
         n_eff = step.effective_sample_size or ctx.n
         z_with_winner = ctx.z(before + [winner])
-        comparisons = []
-        for c in others:
-            forward = ctx.adds(c, candidates[c], z_with_winner, n_permutations, rng, alpha, n_eff)
+        # The round's comparisons are independent: they run in parallel, each with its own random stream,
+        # split from the run's in a fixed order, so results do not depend on the number of workers (apart from rounding).
+        def compare(job):
+            c, stream = job
+            forward = ctx.adds(c, candidates[c], z_with_winner, n_permutations, stream, alpha, n_eff)
             z_with_c = as2d(candidates[c]) if z is None else np.hstack([z, as2d(candidates[c])])
-            reverse = ctx.adds(winner, candidates[winner], z_with_c, n_permutations, rng, alpha, n_eff)
-            comparisons.append({
+            reverse = ctx.adds(winner, candidates[winner], z_with_c, n_permutations, stream, alpha, n_eff)
+            return {
                 "candidate": c,
                 "relation": _relation(forward, reverse, margin),
                 "candidate_adds_beyond_selected": forward,
                 "selected_adds_beyond_candidate": reverse,
-            })
+            }
+        comparisons = parallel_map(compare, list(zip(others, rng.spawn(len(others)))))
         records.append({"round": i + 1, "selected": winner, "given": before, "margin": margin,
                         "tier": ctx.tier.name, "alpha": alpha, "effect_size_floor": ctx.tier.effect_size_floor,
                         "flag_level": alpha / (2 * len(comparisons)), "comparisons": comparisons})
@@ -238,12 +242,19 @@ def equally_supported_sets(
                 options[i].append(c["candidate"])
                 relation_of[(rec["selected"], c["candidate"])] = c["relation"]
     context_of, rank = _contexts(sample, tier, tiers)
-    seen, out = set(), []
+    seen, combos = set(), []
     for combo in itertools.product(*options):
         if len(set(combo)) < len(combo) or frozenset(combo) in seen:
             continue
         seen.add(frozenset(combo))
-        members = list(combo)
+        combos.append(list(combo))
+
+    # Each set is verified independently, in parallel, with its own random stream (see information_equivalence).
+    def verify(job):
+        members, rng = job
+        return _verify_set(members, rng)
+
+    def _verify_set(members, rng):
         missing_slots = [i for i, w in enumerate(selected) if w not in members]
         missing = [selected[i] for i in missing_slots]
         beyond = None
@@ -263,9 +274,10 @@ def equally_supported_sets(
         swaps = [relation_of[(w, c)] for w, c in zip(selected, members) if w != c]
         equivalent = bool(supported and all(r == "equivalent" for r in swaps)
                           and (beyond is None or beyond["detectable_r2"] <= margin))
-        out.append({"set": members, "selected": not missing, "supported": bool(supported),
-                    "equivalent": equivalent, "selected_adds_beyond_set": beyond, "members": member_tests})
-    return out
+        return {"set": members, "selected": not missing, "supported": bool(supported),
+                "equivalent": equivalent, "selected_adds_beyond_set": beyond, "members": member_tests}
+
+    return parallel_map(verify, list(zip(combos, rng.spawn(len(combos))))) if combos else []
 
 
 def summarize_sets(selection: SelectionResult, comparisons: list[dict], sets: list[dict], margin: float,

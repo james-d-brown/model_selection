@@ -125,3 +125,38 @@ def test_after_an_escalation_each_formulation_is_compared_with_the_tier_that_acc
     equally_supported_sets(sel, records, small, t2, 99, 0.05, np.random.default_rng(2), 0.02,
                            {"t1": (t1, big), "t2": (t2, small)})
     assert not t2.test.calls
+
+
+def test_comparisons_do_not_depend_on_the_number_of_workers():
+    """Each comparison and set check has its own random stream, split from the
+    run's in a fixed order, so running them in parallel gives the same records:
+    the same decisions, and numbers equal apart from rounding (the linear-algebra
+    library sums in a different order with a different number of threads)."""
+    from model_selection.parallel import set_workers
+    from model_selection.selection.equivalence import equally_supported_sets
+    rng = np.random.default_rng(0)
+    n = 120
+    base = rng.normal(size=n)
+    obs = base + 0.5 * rng.normal(size=n)
+    sample = SelectionSample({"a": base + 0.3 * rng.normal(size=n), "b": base + 0.3 * rng.normal(size=n),
+                              "c": rng.normal(size=n)}, obs, np.arange(n), 0)
+    tier = build_tier("linear", SelectionConfig())
+    sel = greedy_forward_selection(sample, tier, 99, rng=np.random.default_rng(1))
+    out = []
+    for workers in (1, 3):
+        set_workers(workers)
+        try:
+            recs = information_equivalence(sel, sample, tier, 99, 0.05, np.random.default_rng(2), 0.02)
+            sets = equally_supported_sets(sel, recs, sample, tier, 99, 0.05, np.random.default_rng(3), 0.02)
+            out.append((recs, sets))
+        finally:
+            set_workers(None)
+    def same(a, b):
+        if isinstance(a, dict):
+            return isinstance(b, dict) and a.keys() == b.keys() and all(same(a[k], b[k]) for k in a)
+        if isinstance(a, (list, tuple)):
+            return type(a) is type(b) and len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+        if isinstance(a, float) and not isinstance(a, bool):
+            return isinstance(b, float) and (np.isnan(a) and np.isnan(b) or np.isclose(a, b, rtol=1e-10, atol=1e-12))
+        return a == b
+    assert same(out[0], out[1])

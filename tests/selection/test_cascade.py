@@ -131,11 +131,41 @@ def test_adequacy_checks_apply_the_resolved_floor():
     assert "effect_size_floor=0.9" in outcome.decision_reason
 
 
-def test_nonlinear_and_interaction_test_caps_are_matched():
-    # The effect-modification check runs on the nonlinear tier's sample, so a larger cap
-    # would have no effect and a smaller one would thin that sample again.
+def test_both_kernel_escalation_tests_use_the_shared_sample_cap():
+    """The linear adjustment and effect-modification tests are built with
+    SelectionConfig.nonlinear_max_n; the old AdequacyConfig cap only warns."""
+    import warnings
     from model_selection.selection.config import AdequacyConfig, SelectionConfig
-    assert SelectionConfig().nonlinear_max_n == AdequacyConfig().kernel_check_max_n == 2000
+    from model_selection.selection.tiers import build_tier
+    from model_selection.selection import tiers
+    selection = SelectionConfig(nonlinear_max_n=1234)
+    seen = {}
+    real_spec = tiers.linear_specification_test
+    tiers.linear_specification_test = lambda *a, **k: seen.setdefault("max_n", k["max_n"])
+    try:
+        removal = next(c for c in build_tier("linear", selection, AdequacyConfig()).adequacy_checks
+                       if c.stage == "removal")
+        removal.test(np.zeros(5), np.zeros(5), np.zeros((5, 1)))
+    finally:
+        tiers.linear_specification_test = real_spec
+    assert seen["max_n"] == 1234
+    from model_selection.statistics.adequacy import state_independence
+    built = []
+    real = state_independence.StateIndependenceTest.__init__
+
+    def spy(self, *args, **kwargs):
+        built.append(kwargs.get("max_n"))
+        real(self, *args, **kwargs)
+    state_independence.StateIndependenceTest.__init__ = spy
+    try:
+        build_tier("nonlinear", selection, AdequacyConfig())
+    finally:
+        state_independence.StateIndependenceTest.__init__ = real
+    assert built == [1234]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        AdequacyConfig(kernel_check_max_n=4000)
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
 
 def test_real_cascade_escalates_from_the_linear_tier_on_effect_modification():

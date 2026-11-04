@@ -45,6 +45,10 @@ def run_selection_stage(
     tier_samples : per-tier replacement samples (subsampled long records).
     label : included in log messages.
     """
+    from model_selection.parallel import set_workers
+    from model_selection.statistics.regression.kernel_residuals import set_low_rank
+    set_workers(selection.n_jobs)
+    set_low_rank(selection.nonlinear_rank)
     if selection.measure == CASCADE:
         tiers = build_cascade(selection, adequacy, multivariate, tier_samples, plot_factory)
         logger.info(f"[*] Tiered (linear -> nonlinear -> CMI) forward selection ({label})")

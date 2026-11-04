@@ -91,14 +91,14 @@ def test_a_pooled_cmi_selection_without_the_calibration_check_is_flagged():
     assert [f["code"] for f in review_flags(result)] == ["cmi_calibration_not_checked"]
 
 
-def test_dropped_crossfit_buffer_produces_a_review_flag():
+def test_short_crossfit_blocks_and_capped_factors_produce_review_flags():
     result = _pooled(False)
     result.selection.trajectory[0].dependence = {"block_length": 3, "estimated": False, "dependence_decays": True,
-                                                 "crossfit_buffer_dropped_samples": 2}
+                                                 "crossfit_blocks_short": True, "low_rank_material": True,
+                                                 "low_rank_rank_change": 0.02}
     flags = review_flags(result)
-    assert [f["code"] for f in flags] == ["crossfit_buffer_dropped"]
-    assert "2 sample(s) were cross-fitted" in flags[0]["message"]
-    result.selection.trajectory[0].dependence["crossfit_buffer_dropped_samples"] = 0
+    assert [f["code"] for f in flags] == ["crossfit_blocks_short", "low_rank_material"]
+    result.selection.trajectory[0].dependence.update(crossfit_blocks_short=False, low_rank_material=False)
     assert review_flags(result) == []
 
 

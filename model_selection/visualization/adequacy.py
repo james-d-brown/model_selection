@@ -538,9 +538,9 @@ def plot_state_independence_diagnostics(
 
 KERNEL_PLOT_MAX_N = 2000
 """Largest sample a diagnostic plot fits a kernel regression to. Longer
-samples (pooled records in the linear tier) are plotted on this many evenly
-spaced rows, as the kernel-based tests themselves are run on at most this
-many evenly spaced samples (AdequacyConfig.kernel_check_max_n)."""
+samples are plotted on this many evenly spaced rows, to keep the pages
+small; the plots are visual aids, and the formal tests use the shared kernel
+sample cap (SelectionConfig.nonlinear_max_n)."""
 
 
 def _evenly_spaced(*arrays, max_n: int = KERNEL_PLOT_MAX_N):
