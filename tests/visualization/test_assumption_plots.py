@@ -105,4 +105,11 @@ def test_dependence_plot_is_written_by_the_pooled_pathway(tmp_path):
     assert (tmp_path / f"{basin.gage}_dependence.html").exists()
     rng = np.random.default_rng(2)
     fig = plot_dependence({"a": rng.standard_normal(500)}, 1.0, "G", observations=rng.standard_normal(500))
-    assert len(fig.data) == 2
+    assert len([t for t in fig.data if t.showlegend is not False]) == 2   # one curve per series
+    # With the flows as supplied, a second panel draws their correlograms for comparison.
+    raw = np.exp(np.convolve(rng.standard_normal(520), np.ones(21) / 21, "valid"))
+    fig = plot_dependence({"a": rng.standard_normal(500)}, 1.0, "G", observations=rng.standard_normal(500),
+                          raw={"a": raw}, raw_observations=raw)
+    curves = [t for t in fig.data if t.mode == "lines" and t.hovertemplate is None]
+    assert {t.yaxis for t in curves} == {"y", "y2"} and len(curves) == 4
+    assert "before any transformation" in fig.layout.annotations[1].text

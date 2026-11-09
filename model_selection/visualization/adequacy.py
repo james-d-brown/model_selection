@@ -595,7 +595,7 @@ def plot_regression_specification_diagnostics(
     """Residuals against fitted values of the least-squares regressions that
     remove the conditioning set in the linear tier, one panel per column of
     the candidate and of the observations, labelled by feature_names when
-    given (for example the high-flow pathway's principal components). A
+    given (for example the high-flow event pathway's principal components). A
     binned trend near zero everywhere means the regression has removed the
     conditioning set's influence; systematic curvature means it has not.
     Requires non-empty conditioning.

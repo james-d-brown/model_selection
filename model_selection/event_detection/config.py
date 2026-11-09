@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from model_selection.event_detection.pot.detector import POTConfig
 from model_selection.event_detection.wasp.config import WASPConfig
+from model_selection.preprocessing.censoring import DEFAULT_HIGH_FLOW_QUANTILE
 
 DETECTION_METHODS = ("pot", "wasp")
 DEPENDENCE_RULES = ("recession", "arrivals", "lag")
@@ -30,7 +31,7 @@ class EventConfig:
         events closer than the dependence lag.
     """
     method: str = "wasp"
-    high_flow_quantile: float = 0.90
+    high_flow_quantile: float = DEFAULT_HIGH_FLOW_QUANTILE
     consensus: str = "median"
     pot: POTConfig = field(default_factory=POTConfig)
     wasp: WASPConfig = field(default_factory=WASPConfig)

@@ -133,15 +133,47 @@ def test_neighbor_index_excludes_temporal_neighbours():
 
 
 def test_local_permutation_draws_every_value_from_the_samples_own_neighbourhood():
-    """Runge (2018, Algorithm 1): each sample receives a neighbour's value,
-    never a value from outside its neighbourhood, and values repeat only
-    when a neighbourhood is exhausted."""
+    """Runge (2018, Algorithm 1): each sample receives the value of a member
+    of its neighbourhood (itself or a neighbour), never a value from outside
+    it, and values repeat only when a neighbourhood is exhausted. As in
+    Runge's implementation, a sample may keep its own value, also when the
+    neighbour index excludes temporal neighbours."""
     from model_selection.statistics.significance.neighborhood import compute_neighbor_index, local_permutation
     rng = np.random.default_rng(10)
-    nn, _ = compute_neighbor_index(rng.normal(size=(300, 3)), 5, workers=1)
-    index, n_repeats = local_permutation(nn, rng)
-    assert all(index[i] in nn[i] for i in range(300))
-    assert len(set(index.tolist())) == 300 - n_repeats
+    for lag in (0, 5):
+        nn, _ = compute_neighbor_index(rng.normal(size=(300, 3)), 4, np.arange(300), lag, workers=1)
+        assert not np.any(nn == np.arange(300)[:, None])
+        kept = 0
+        for _ in range(20):
+            index, n_repeats = local_permutation(nn, rng)
+            assert all(index[i] == i or index[i] in nn[i] for i in range(300))
+            assert len(set(index.tolist())) == 300 - n_repeats
+            kept += np.sum(index == np.arange(300))
+        # Each of a sample's five members is about equally likely; far from never keeping its own value.
+        assert 0.1 < kept / (20 * 300) < 0.4
+
+
+def test_local_permutation_test_holds_its_level_with_two_conditioning_variables():
+    """Candidate and observations both depend strongly on two conditioning
+    variables and are conditionally independent. With every sample forced
+    to take another sample's value (the former defect) the rate at the 5%
+    level was 0.13 to 0.15 at 150 to 600 samples; with the sample itself in
+    its neighbourhood, as in Runge's implementation, it was 0.04 to 0.05,
+    and Runge's implementation gave 0.05 to 0.07 (paired runs on identical
+    data, 400 to 1000 replicates). 99 null draws resolve the 5% level
+    exactly; the bound 0.10 separates the two rates (Monte Carlo SE 0.018
+    and 0.029 at 150 replicates)."""
+    from model_selection.statistics.conditional_independence import CMITest
+    rng = np.random.default_rng(11)
+    reps, n, B = 150, 150, 99
+    rejected = 0
+    for _ in range(reps):
+        z = rng.normal(size=(n, 2))
+        s = z.sum(axis=1, keepdims=True)
+        c, o = s + rng.normal(size=(n, 1)), s + rng.normal(size=(n, 1))
+        r = CMITest(k_fraction=0.2, workers=1).run({"c": c}, o, z, B, rng, np.arange(n), 0)
+        rejected += (1 + np.sum(r.null[:, 0] >= r.observed[0])) / (B + 1) < 0.05
+    assert rejected / reps <= 0.10
 
 
 def test_local_permutation_keeps_own_value_without_neighbours():
@@ -222,14 +254,16 @@ def test_multiplier_weights_have_the_bartlett_correlation_at_sparse_positions():
     assert abs(c[2, 3]) < 0.02 and abs(c[3, 4]) < 0.02
 
 
-def test_ties_are_separated_for_the_nearest_neighbour_estimator():
-    from model_selection.statistics.conditional_independence.cmi import break_ties
+def test_standardize_keeps_tied_values_together_and_equalizes_scale():
+    """A point mass (e.g. zero flows or a censoring threshold) stays one value
+    after standardization, and no new ties appear: the rescaling is linear."""
+    from model_selection.statistics.conditional_independence.cmi import standardize
     rng = np.random.default_rng(51)
-    x = np.column_stack([np.r_[np.zeros(50), rng.normal(size=50)], rng.normal(size=100)])
-    out = break_ties(x, rng)
-    assert np.unique(out[:, 0]).size == 100 and np.max(np.abs(out[:, 0] - x[:, 0])) < 1e-8
-    assert np.array_equal(out[:, 1], x[:, 1])
-
+    x = np.column_stack([np.r_[np.zeros(50), rng.normal(size=50) + 5], 100 * rng.normal(size=100), np.ones(100)])
+    s = standardize(x)
+    assert np.unique(s[:50, 0]).size == 1 and np.unique(s[:, 0]).size == 51
+    assert np.allclose(s[:, :2].mean(axis=0), 0) and np.allclose(s[:, :2].std(axis=0), 1)
+    assert np.all(s[:, 2] == 0)
 
 def test_calibration_surrogate_count_detects_three_times_alpha():
     from scipy.stats import binom
@@ -345,24 +379,37 @@ def test_the_linear_tier_uses_gaussian_multipliers(monkeypatch):
 
 def test_cmi_estimator_excludes_temporal_neighbours_exactly():
     """With a Theiler window, samples closer in time than the window are not
-    neighbours in the estimate (brute force); without one, nothing changes."""
+    neighbours in the estimate (brute force, Mesner and Shalizi, 2021, eqs.
+    14, 18, 19); without one, nothing changes. Half
+    the samples take one of two values in every variable, so some samples'
+    k-th neighbours coincide with them and both branches of eq. 19 are
+    exercised."""
     from scipy.special import digamma
     from model_selection.statistics.association.information import CachedCMI
     rng = np.random.default_rng(0)
     n, k = 200, 10
     x, y, z = (np.cumsum(rng.normal(size=(n, 1)), axis=0) for _ in range(3))
+    for v in (x, y, z):
+        v[::2] = rng.integers(0, 2, size=(n // 2, 1))
     t = np.arange(n, dtype=float)
     assert CachedCMI(y, z, k=k)(x) == CachedCMI(y, z, k=k, time_positions=t, theiler_window=0)(x)
+    branches = set()
     for w in (3, 10):
         J, XZ, YZ = np.hstack([x, y, z]), np.hstack([x, z]), np.hstack([y, z])
         total = 0.0
         for i in range(n):
             ok = np.abs(t - t[i]) >= w
             eps = np.sort(np.abs(J[ok] - J[i]).max(axis=1))[k - 1]
-            count = lambda S: int(np.sum(np.abs(S[ok] - S[i]).max(axis=1) < eps))
-            total += digamma(count(z) + 1) - digamma(count(XZ) + 1) - digamma(count(YZ) + 1)
-        expected = digamma(k) + total / n
+            count = lambda S: int(np.sum(np.abs(S[ok] - S[i]).max(axis=1) <= eps))
+            k_tilde = count(J)
+            branches.add(k_tilde == k)
+            if k_tilde == k:
+                total += digamma(k) + digamma(count(z)) - digamma(count(XZ)) - digamma(count(YZ))
+            else:
+                total += np.log(k_tilde) + np.log(count(z)) - np.log(count(XZ)) - np.log(count(YZ))
+        expected = total / n
         assert CachedCMI(y, z, k=k, time_positions=t, theiler_window=w)(x) == pytest.approx(expected, abs=1e-10)
+    assert branches == {True, False}
 
 
 def _dominant_events(n, d, beta, rng, sigma=1.0):

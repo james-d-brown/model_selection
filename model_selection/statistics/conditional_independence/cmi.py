@@ -1,17 +1,31 @@
 """
 Free-form tier: conditional mutual information (CMI).
 
-The k-nearest-neighbour estimator of Frenzel and Pompe (2007) gives CMI in
-nats, with k set relative to the sample size as Runge (2018) recommends. Its null distribution uses local permutation (Runge, 2018): candidate
+The k-nearest-neighbour estimator of Mesner and Shalizi (2021) gives CMI in
+nats, with k set relative to the sample size as Runge (2018) recommends. It
+extends the Frenzel and Pompe (2007) estimator that Runge uses to data with
+ties, such as a censoring threshold,
+and remains consistent there (statistics.association.information). Its null distribution uses local permutation (Runge, 2018): candidate
 values are exchanged only between samples that are near neighbours in Z,
-excluding neighbours closer than the dependence lag in time (Theiler, 1986).
+excluding neighbours closer than the dependence lag in time (Theiler, 1986);
+a sample may keep its own value, as in Runge's implementation.
 The same Theiler window applies in the estimator: samples closer than it in
 time are not each other's neighbours, so serial correlation does not inflate
 the estimate (Theiler, 1986).
-Before the estimate and the neighbour search, every column of the candidate,
-the observations and Z is replaced by its ranks (Runge, 2018): CMI is
-unchanged by such a transform, but the estimator's max-norm distances are
+Before the estimate, every column of the candidate, the observations and Z
+is standardized to mean zero and unit variance. CMI
+is unchanged by such a rescaling, but the estimator's max-norm distances are
 not, and would otherwise be dominated by the column with the widest spread.
+A fixed linear rescaling keeps the estimator in the setting of Mesner and
+Shalizi (2021), who estimate on the values themselves: tied values stay
+tied, so a point mass stays one value, and no other ties are created. Ranks
+(Runge, 2018) are not used: integer ranks put distinct samples at exactly
+equal distances, which the Mesner-Shalizi estimator counts as it counts a
+point mass. Ties are not broken with noise, which would make the estimator
+inconsistent (Gao et al., 2017). The local permutation's neighbour search in
+Z uses the ranks of Z, as in Runge (2018), tied values sharing their average
+rank: it counts nothing at a boundary distance, so rank ties there only
+leave the order among equidistant neighbours arbitrary.
 With Z empty, a time-block permutation is used, with the Politis–White
 block length for the products of the candidate and the observations on
 evenly spaced samples. The local permutation treats samples as exchangeable;
@@ -35,32 +49,29 @@ from model_selection.utils import as2d
 
 
 def ranks(X: np.ndarray) -> np.ndarray:
-    """Each column of X replaced by the ranks of its values, 1 to n (ties,
-    already broken, are ordered by position)."""
+    """Each column of X replaced by the ranks of its values, 1 to n; tied
+    values share their average rank."""
     X = as2d(X)
-    return np.column_stack([rankdata(X[:, j], method="ordinal") for j in range(X.shape[1])]).astype(float)
+    return np.column_stack([rankdata(X[:, j], method="average") for j in range(X.shape[1])]).astype(float)
 
 
-def break_ties(X: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """X with tied values in any column separated by noise of 1e-10 times
-    the column's standard deviation, as Kraskov et al. (2004) recommend for
-    the nearest-neighbour estimator, which assumes no two samples coincide
-    (e.g. event durations of zero). Columns without ties are unchanged."""
-    X = np.array(as2d(X), dtype=float)
-    for j in range(X.shape[1]):
-        col = X[:, j]
-        if np.unique(col).size < col.size:
-            sd = col.std()
-            X[:, j] = col + 1e-10 * (sd if sd > 0 else 1.0) * rng.standard_normal(col.size)
-    return X
+def standardize(X: np.ndarray) -> np.ndarray:
+    """Each column of X centred and scaled to unit variance; a constant
+    column is only centred. Tied values stay tied."""
+    X = np.asarray(as2d(X), dtype=float)
+    sd = X.std(axis=0)
+    return (X - X.mean(axis=0)) / np.where(sd > 0, sd, 1.0)
 
 
 class CMITest(ConditionalIndependenceTest):
-    """KSG conditional mutual information with a local-permutation null.
+    """Nearest-neighbour conditional mutual information (Mesner and Shalizi,
+    2021) with a local-permutation null.
 
     k_fraction : estimator neighbour count as a fraction of n (Runge, 2018:
         0.1 to 0.2); k, if given, fixes the count instead.
-    n_neighbors : local-permutation neighbourhood size (Runge, 2018: 5 to 10).
+    n_neighbors : local-permutation neighbourhood size, counting the sample
+        itself, which may keep its own value (Runge, 2018: 5 to 10; 5 is the
+        default of his implementation, tigramite's CMIknn). At least 2.
     run_length : decorrelation-lag run length for the block permutation used
         when Z is empty (docs/methods.md, Dependence between samples).
     theiler_window : neighbours closer than this in time are not
@@ -70,8 +81,10 @@ class CMITest(ConditionalIndependenceTest):
     """
     name = "cmi"
 
-    def __init__(self, k: int | None = None, k_fraction: float = 0.1, n_neighbors: int = 10, workers: int = -1,
+    def __init__(self, k: int | None = None, k_fraction: float = 0.1, n_neighbors: int = 5, workers: int = -1,
                  run_length: int = DEFAULT_RUN_LENGTH, theiler_window: int | None = None):
+        if n_neighbors < 2:
+            raise ValueError("n_neighbors counts the sample itself and must be at least 2")
         self.run_length = run_length
         self.theiler_window = theiler_window
         self.k = k
@@ -90,27 +103,24 @@ class CMITest(ConditionalIndependenceTest):
             return lambda rng: time_block_permutation(n, time_positions, dependence_lag, rng)
         window = dependence_lag if self.theiler_window is None else self.theiler_window
         nn_idx, _ = compute_neighbor_index(
-            as2d(conditioning), self.n_neighbors, time_positions=time_positions,
+            as2d(conditioning), self.n_neighbors - 1, time_positions=time_positions,
             min_temporal_lag=int(round(window)), workers=self.workers,
         )
         return lambda rng: local_permutation(nn_idx, rng)[0]
 
     def _setup(self, candidates, obs, conditioning, rng, time_positions, dependence_lag, grid_step):
-        """Tie-broken inputs, the estimator, the observed values, the
+        """Standardized inputs, the estimator, the observed values, the
         permutation and the dependence record shared by run and
         sequential_p_value."""
-        candidates = {nm: break_ties(c, rng) for nm, c in candidates.items()}
-        obs = break_ties(obs, rng)
-        conditioning = None if conditioning is None else break_ties(conditioning, rng)
         names = list(candidates)
         n = as2d(obs).shape[0]
         k = self.estimator_k(n)
-        ranked = {nm: ranks(c) for nm, c in candidates.items()}
-        ranked_conditioning = None if conditioning is None else ranks(conditioning)
+        scaled = {nm: standardize(c) for nm, c in candidates.items()}
+        scaled_conditioning = None if conditioning is None else standardize(conditioning)
         window = dependence_lag if self.theiler_window is None else self.theiler_window
-        estimator = CachedCMI(ranks(obs), ranked_conditioning, k=k, workers=self.workers,
+        estimator = CachedCMI(standardize(obs), scaled_conditioning, k=k, workers=self.workers,
                               time_positions=time_positions, theiler_window=window)
-        observed = np.array([float(estimator(ranked[nm])) for nm in names])
+        observed = np.array([float(estimator(scaled[nm])) for nm in names])
         block, dependence = None, None
         if conditioning is None:
             resolved = resolve_block(time_positions, dependence_lag,
@@ -119,8 +129,9 @@ class CMITest(ConditionalIndependenceTest):
         else:
             dependence = samples_independent(time_positions, [obs] + [candidates[nm] for nm in names],
                                              self.run_length, grid_step)
-        permute = self._permuter(ranked_conditioning, n, time_positions, dependence_lag if block is None else block)
-        return ranked, ranked_conditioning, names, n, k, estimator, observed, block, dependence, permute
+        permute = self._permuter(None if conditioning is None else ranks(conditioning), n, time_positions,
+                                 dependence_lag if block is None else block)
+        return scaled, scaled_conditioning, names, n, k, estimator, observed, block, dependence, permute
 
     def sequential_p_value(self, candidate, obs, conditioning, max_resamples, rng, time_positions, dependence_lag,
                            exceedances: int, grid_step=None) -> tuple[float, np.ndarray, float]:

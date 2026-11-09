@@ -95,12 +95,19 @@ def pivoted_cholesky(diag: np.ndarray, column, max_rank: int, kind: str = "kerne
     n = d.size
     total = float(d.sum())
     tol = max(float(d.max()), 0.0) * n * np.finfo(float).eps
-    G = np.zeros((n, min(max_rank, n)))
+    limit = min(max_rank, n)
+    # Columns are allocated as they are needed, doubling the allocation each
+    # time, so that memory follows the rank reached rather than the cap.
+    G = np.zeros((n, min(limit, 64)))
     m = 0
-    while m < G.shape[1]:
+    while m < limit:
         p = int(np.argmax(d))
         if d[p] <= tol:
             break
+        if m == G.shape[1]:
+            grown = np.zeros((n, min(limit, 2 * G.shape[1])))
+            grown[:, :m] = G
+            G = grown
         g = column(p) - G[:, :m] @ G[p, :m]
         g /= np.sqrt(d[p])
         G[:, m] = g
@@ -214,16 +221,23 @@ def _folds(block: np.ndarray, k: int, n_regressors: int) -> tuple[list, bool]:
 def _fold_decomposition(s: np.ndarray, U: np.ndarray, pred: np.ndarray, fit: np.ndarray, n: int):
     """(predicted samples, fitting samples, eigenvalues e and vectors V of the
     centred Gram matrix of the factor's columns Phi = U diag(sqrt(s)) over
-    the fitting samples, and Q = (Phi_pred - their mean) V). Phi has centred
-    columns and Phi' Phi = diag(s), so the Gram matrix over the fitting
-    samples is diag(s) minus that over the samples left out."""
+    the fitting samples, and mu, the mean of Phi over the fitting samples).
+    Phi has centred columns and Phi' Phi = diag(s), so the Gram matrix over
+    the fitting samples is diag(s) minus that over the samples left out. The
+    predicted samples' coordinates Q = (Phi_pred - mu) V are formed when
+    needed (_fold_q), so that they are not held for every bandwidth."""
     sq = np.sqrt(s)
     drop = np.setdiff1d(np.arange(n), fit, assume_unique=True)
     Phi_drop = U[drop] * sq
     mu = -Phi_drop.sum(axis=0) / fit.size
     gram = np.diag(s) - Phi_drop.T @ Phi_drop - fit.size * np.outer(mu, mu)
     e, V = np.linalg.eigh((gram + gram.T) / 2.0)
-    return pred, fit, np.maximum(e, 0.0), V, (U[pred] * sq - mu) @ V
+    return pred, fit, np.maximum(e, 0.0), V, mu
+
+
+def _fold_q(s: np.ndarray, U: np.ndarray, pred: np.ndarray, V: np.ndarray, mu: np.ndarray) -> np.ndarray:
+    """Q = (Phi_pred - mu) V of a fold (see _fold_decomposition)."""
+    return (U[pred] * np.sqrt(s) - mu) @ V
 
 
 def _centred_spectrum(K: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -235,10 +249,15 @@ def _centred_spectrum(K: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return s[keep], U[:, keep]
 
 
-def _spectrum_of_factor(G: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _spectrum_of_factor(G: np.ndarray, overwrite: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """Centred spectrum of G G', from the thin singular value decomposition
-    of G with centred columns."""
-    U, sv, _ = np.linalg.svd(G - G.mean(axis=0), full_matrices=False)
+    of G with centred columns. overwrite: centre G in place rather than in a
+    copy (G is then not used again)."""
+    if overwrite:
+        G -= G.mean(axis=0)
+    else:
+        G = G - G.mean(axis=0)
+    U, sv, _ = np.linalg.svd(G, full_matrices=False)
     s = sv ** 2
     keep = s > max(float(s.max()), 0.0) * G.shape[0] * np.finfo(float).eps
     return s[keep], U[:, keep]
@@ -252,8 +271,8 @@ def _low_rank_spectrum(Zs: np.ndarray, sq_norms: np.ndarray, bw: float):
     for the rank check (ConditioningRegression.rank_change); else None."""
     G, share = pivoted_cholesky(np.ones(Zs.shape[0]), _rbf_column(Zs, sq_norms, bw), _LOW_RANK,
                                 kind="conditioning")
-    s, U = _spectrum_of_factor(G)
     half = _spectrum_of_factor(G[:, :max(1, G.shape[1] // 2)]) if share > 0 else None
+    s, U = _spectrum_of_factor(G, overwrite=True)
     return s, U, share, half
 
 
@@ -306,14 +325,14 @@ class ConditioningRegression:
         if spectra is None:
             spectra = run_tasks(spectrum_tasks(Z))
         n = self.n
-        jobs = [(i, False, sp[0], sp[1]) for i, sp in enumerate(spectra)]
-        jobs += [(i, True, sp[3][0], sp[3][1]) for i, sp in enumerate(spectra) if sp[3] is not None]
-        decomps = run_tasks([lambda s=s_, U=U_, pr=pr, ft=ft: _fold_decomposition(s, U, pr, ft, n)
-                             for _, _, s_, U_ in jobs for pr, ft in folds])
+        decomps = run_tasks([lambda s=sp[0], U=sp[1], pr=pr, ft=ft: _fold_decomposition(s, U, pr, ft, n)
+                             for sp in spectra for pr, ft in folds])
         k = len(folds)
-        by_job = {(i, half): decomps[j * k:(j + 1) * k] for j, (i, half, _, _) in enumerate(jobs)}
-        self.spectra = [(sp[0], sp[1], sp[2], by_job[(i, False)],
-                         None if sp[3] is None else (sp[3][0], sp[3][1], by_job[(i, True)]))
+        self._folds = folds
+        # The half-rank spectra's blocks are decomposed only if a fit chooses
+        # a bandwidth whose factor reached the cap (_half_folds).
+        self.spectra = [(sp[0], sp[1], sp[2], decomps[i * k:(i + 1) * k],
+                         None if sp[3] is None else [sp[3][0], sp[3][1], None])
                         for i, sp in enumerate(spectra)]
         self.cap_share = max(float(sp[2]) for sp in spectra)
         self.rank_change = 0.0
@@ -321,27 +340,36 @@ class ConditioningRegression:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _fold_terms(Yc: np.ndarray, s: np.ndarray, U: np.ndarray, folds: list, n: int) -> list:
-        """Per fold: (predicted samples, fitting mean, g = V' Phi_fit'(Y_fit -
-        mean), Q, centred predicted targets) for one bandwidth."""
+    def _fold_terms(Yc: np.ndarray, s: np.ndarray, U: np.ndarray, folds: list, n: int):
+        """Per fold, in turn: (predicted samples, fitting mean, g = V'
+        Phi_fit'(Y_fit - mean), Q, centred predicted targets, eigenvalues e)
+        for one bandwidth. A generator, so that one fold's Q is held at a
+        time."""
         sq = np.sqrt(s)
         PhiY = (U * sq).T @ Yc                         # Phi' Y over all samples
-        out = []
-        for pred, fit, e, V, Q in folds:
+        for pred, fit, e, V, mu in folds:
             drop = np.setdiff1d(np.arange(n), fit, assume_unique=True)
             y_mean = Yc[fit].mean(axis=0)
             PhiY_fit = PhiY - (U[drop] * sq).T @ Yc[drop]   # Phi_fit' Y_fit
             Phi_sum = -(U[drop] * sq).sum(axis=0)           # sum of Phi over the fitting samples
             g = V.T @ (PhiY_fit - np.outer(Phi_sum, y_mean))
-            out.append((pred, y_mean, g, Q, Yc[pred] - y_mean))
-        return out
+            yield pred, y_mean, g, _fold_q(s, U, pred, V, mu), Yc[pred] - y_mean, e
 
     @staticmethod
-    def _residuals_at(terms: list, folds: list, lam: float, shape) -> np.ndarray:
+    def _residuals_at(terms, lam: float, shape) -> np.ndarray:
         resid = np.empty(shape)
-        for (pred, _, g, Q, a), (_, _, e, _, _) in zip(terms, folds):
+        for pred, _, g, Q, a, e in terms:
             resid[pred] = a - Q @ (g / (e + lam)[:, None])
         return resid
+
+    def _half_folds(self, b: int) -> tuple:
+        """(spectrum, U, block decompositions) of the half-rank factor of
+        bandwidth b, decomposing its blocks on first use."""
+        half = self.spectra[b][4]
+        with self._lock:
+            if half[2] is None:
+                half[2] = [_fold_decomposition(half[0], half[1], pr, ft, self.n) for pr, ft in self._folds]
+            return tuple(half)
 
     def _fit(self, Y: np.ndarray, r: int):
         """(spectrum index, penalty, cross-fitted residuals of every column of
@@ -352,20 +380,19 @@ class ConditioningRegression:
         Yc = Y - Y.mean(axis=0)
         best = (np.inf, None)
         for b, (s, U, _, folds, _) in enumerate(self.spectra):
-            terms = self._fold_terms(Yc, s, U, folds, self.n)
             err = np.zeros(len(RIDGE_PENALTIES))
-            for (pred, _, g, Q, a), (_, _, e, _, _) in zip(terms, folds):
+            for pred, _, g, Q, a, e in self._fold_terms(Yc, s, U, folds, self.n):
                 for j, lam in enumerate(RIDGE_PENALTIES):
                     err[j] += float(np.sum((a[:, :r] - Q @ (g[:, :r] / (e + lam)[:, None])) ** 2))
             j = int(np.argmin(err))
             if err[j] < best[0]:
-                best = (err[j], (b, RIDGE_PENALTIES[j], terms, folds))
-        rss, (b, lam, terms, folds) = best
-        resid = self._residuals_at(terms, folds, lam, Yc.shape)
-        half = self.spectra[b][4]
+                best = (err[j], (b, RIDGE_PENALTIES[j]))
+        rss, (b, lam) = best
+        s, U, _, folds, half = self.spectra[b]
+        resid = self._residuals_at(self._fold_terms(Yc, s, U, folds, self.n), lam, Yc.shape)
         if half is not None and rss > 0:
-            s_h, U_h, folds_h = half
-            resid_h = self._residuals_at(self._fold_terms(Yc[:, :r], s_h, U_h, folds_h, self.n), folds_h, lam,
+            s_h, U_h, folds_h = self._half_folds(b)
+            resid_h = self._residuals_at(self._fold_terms(Yc[:, :r], s_h, U_h, folds_h, self.n), lam,
                                          (Yc.shape[0], r))
             change = abs(float(np.sum(resid_h ** 2)) - rss) / rss
             with self._lock:

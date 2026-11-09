@@ -371,16 +371,15 @@ def test_pathways_use_the_largest_decorrelation_lag():
     sel = SelectionConfig(measure="linear", n_permutations=20)
     hf = run_high_flow_analysis(basin, sel, events=EventConfig(method="wasp", high_flow_quantile=0.90),
                                 rng=np.random.default_rng(3))
-    prepared = {k: prepare_series(s.values, rng=np.random.default_rng(0), index=s.index,
-                                  seasonal_window_days=11) for k, s in basin.formulations.items()}
+    prepared = {k: prepare_series(s.values, index=s.index, seasonal_window_days=11)
+                for k, s in basin.formulations.items()}
     lag_hf, _ = max_decorrelation_lag(prepared, sel.dependence_run_length)
-    assert abs(hf.min_temporal_lag - lag_hf) <= max(2, 0.2 * lag_hf)  # jittered ranks differ slightly
+    assert hf.min_temporal_lag == lag_hf  # the preparation is deterministic
     pooled = run_pooled_analysis(basin, sel, rng=np.random.default_rng(4))
-    transformed = {k: prepare_series(s.values, rng=np.random.default_rng(0), index=s.index,
-                                     seasonal_window_days=11)
+    transformed = {k: prepare_series(s.values, index=s.index, seasonal_window_days=11)
                    for k, s in basin.formulations.items()}
     lag, _ = max_decorrelation_lag(transformed, sel.dependence_run_length)
-    assert abs(pooled.min_temporal_lag - lag) <= max(2, 0.2 * lag)  # jittered ranks differ slightly
+    assert pooled.min_temporal_lag == lag
 
 
 def test_pooled_seasonal_conditioning_is_on_by_default_and_can_be_disabled():
@@ -691,7 +690,7 @@ def test_wasp_flags_a_series_whose_scale_range_is_too_short():
 def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
     """With the decorrelation length as the rule for dependence between
     events, where the dependence lag would leave an event fewer than five
-    permutation partners, the high-flow pathway shortens the free-form tier's
+    permutation partners, the high-flow event pathway shortens the free-form tier's
     Theiler window; the selection sample keeps the full dependence lag, which
     every other test uses. With clusters there is nothing to shorten: only an
     event's own cluster is excluded."""

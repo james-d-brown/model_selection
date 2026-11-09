@@ -1,4 +1,4 @@
-"""The selection stage shared by the pooled and high-flow pathways: run one
+"""The selection stage shared by the pooled and high-flow event pathways: run one
 tier or the cascade on a prepared sample."""
 from __future__ import annotations
 

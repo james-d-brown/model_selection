@@ -11,8 +11,8 @@ al., 2017; Huang et al., 2020). Two parts implement it:
   leaves the hypothesis unchanged. With a few decades of record each
   calendar day holds only a few tens of values, so mu(d) pools the days
   within a short window centred on d, with triangular weights that decrease
-  to zero beyond the window, as daily climatologies do (a 5-day window for
-  the ETCCDI percentile indices, Zhang et al., 2005). A short window keeps
+  to zero beyond the window, as daily climatologies pool neighbouring days
+  (Zhang et al., 2005; Hobday et al., 2016). A short window keeps
   abrupt seasonal transitions, such as the onset of snowmelt, sharp.
 - seasonal_phase: the calendar day as a point on the unit circle,
   (sin, cos) of 2 pi d / 365, the conditioning variable the nonlinear and

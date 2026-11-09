@@ -1,6 +1,6 @@
 """Dependence lengths (Politis–White decorrelation lag and block length) and
 their effect on the false-positive rate of the block-resampled tests
-(docs/methods.md, Temporal dependence)."""
+(docs/methods.md, Dependence between samples)."""
 from unittest import mock
 
 import numpy as np

@@ -15,7 +15,7 @@ Packages:
   statistics       association measures, significance tests, adequacy tests, FPCA
   selection        greedy selection, the measure cascade, configuration
   event_detection  per-series event detection (POT, WASP) and consensus events
-  pipeline         the pooled and high-flow pathways and their orchestration
+  pipeline         the pooled and high-flow event pathways and their orchestration
   visualization    plots and HTML output
 """
 from model_selection.event_detection import EventConfig, POTConfig, WASPConfig

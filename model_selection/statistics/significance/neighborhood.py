@@ -3,7 +3,8 @@ Conditioning-space neighbourhoods for local permutation (Runge, 2018).
 
 Candidate values are exchanged only among samples that are near neighbours
 in Z-space, which keeps each sample's candidate value plausible for its own
-Z. Neighbours closer than the dependence lag in time are excluded (the
+Z; a sample may also keep its own value. compute_neighbor_index returns each
+sample's other neighbours; local_permutation adds the sample itself. Neighbours closer than the dependence lag in time are excluded (the
 Theiler window; Theiler, 1986), because temporally adjacent samples are
 close in Z-space for reasons unrelated to conditional exchangeability.
 time_positions are in original time units: np.arange(n) for timestep
@@ -97,12 +98,18 @@ def local_permutation(
 ) -> tuple[np.ndarray, int]:
     """Restricted permutation of Runge (2018, Algorithm 1).
 
-    Points are visited in random order. Each point i receives the value of
-    one of its own Z-neighbours, drawn at random among those whose value has
-    not yet been used; if every neighbour's value has been used, the last
-    neighbour tried is used again. Every sample therefore receives a value
-    from its own neighbourhood, at the cost of occasional repeats. A point
-    with no valid neighbour keeps its own value.
+    The neighbourhood of point i is i itself and its Z-neighbours in
+    nn_idx[i], as in Runge's implementation (tigramite's CMIknn), whose
+    neighbour query returns the point itself first. Points are visited in
+    random order. Each point i receives the value of a member of its
+    neighbourhood, drawn at random among those whose value has not yet been
+    used; if every member's value has been used, the last member tried is
+    used again. Every sample therefore receives a value from its own
+    neighbourhood, at the cost of occasional repeats. A point may keep its
+    own value: excluding it would move every value to a different Z and
+    narrow the null. Keeping one's own value is always valid, also under the
+    Theiler window, which excludes only exchanges between samples close in
+    time. A point with no valid neighbour keeps its own value.
 
     Returns (index, n_repeats): index[i] is the sample whose value i
     receives; n_repeats counts the samples that received an already used
@@ -113,10 +120,11 @@ def local_permutation(
     used = np.zeros(n, dtype=bool)
     n_repeats = 0
     for i in rng.permutation(n):
-        neighbours = nn_idx[i][nn_idx[i] >= 0]
-        if neighbours.size == 0:
+        others = nn_idx[i][nn_idx[i] >= 0]
+        if others.size == 0:
+            used[i] = True
             continue
-        neighbours = rng.permutation(neighbours)
+        neighbours = rng.permutation(np.concatenate(([i], others)))
         free = neighbours[~used[neighbours]]
         if free.size:
             j = free[0]

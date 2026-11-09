@@ -1,4 +1,4 @@
-"""Steps used by both the pooled and the high-flow pathways."""
+"""Steps used by both the pooled and the high-flow event pathways."""
 from __future__ import annotations
 
 import logging
@@ -119,10 +119,12 @@ def log_review_flags(result, pathway: str) -> None:
 
 
 def write_dependence_plot(output: OutputConfig, gage: str, prepared: dict, observations, index,
-                          run_length: int, seasonal_window_days: int | None) -> str | None:
+                          run_length: int, seasonal_window_days: int | None, raw: dict | None = None,
+                          raw_observations=None) -> str | None:
     """Write {gage}_dependence.html (visualization.dependence) when an output
     directory is set, the plot is enabled and the series are time-indexed;
-    returns its path."""
+    returns its path. raw and raw_observations, the flows as supplied, add
+    a panel of their correlograms for comparison."""
     import pandas as pd
 
     if (not (output.dependence_plot and output.output_dir is not None) or len(index) < 2
@@ -136,7 +138,7 @@ def write_dependence_plot(output: OutputConfig, gage: str, prepared: dict, obser
     step_hours = (index[1] - index[0]) / np.timedelta64(1, "h")
     path = os.path.join(output.output_dir, f"{gage}_dependence.html")
     write_standalone_html(plot_dependence(prepared, step_hours, gage, observations, run_length,
-                                          seasonal_window_days), path,
+                                          seasonal_window_days, raw, raw_observations), path,
                           f"{gage} dependence")
     return path
 

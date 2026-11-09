@@ -1,6 +1,6 @@
 """
 The model-evaluation pipeline: a pooled pathway (one sample per timestep)
-and a high-flow pathway (one sample per consensus event), orchestrated per
+and a high-flow event pathway (one sample per consensus event), orchestrated per
 basin by run_basin.
 """
 import logging

@@ -77,10 +77,16 @@ def cmi_calibration(
         rng: np.random.Generator,
         rate_ratio: float = 3.0,
         grid_step: float | None = None,
+        censor=None,
 ) -> dict:
     """False-acceptance rate of the CMI test `test` on surrogates of
     `candidate` given `conditioning` (see the module docstring). Each
-    surrogate test uses at most minimum_resamples(alpha) null draws."""
+    surrogate test uses at most minimum_resamples(alpha) null draws.
+
+    censor : with censoring at high flow, `candidate` is the uncensored
+        candidate and censor(values) censors a surrogate at the candidate's
+        threshold, so that every surrogate has the candidate's point mass
+        there (docs/methods.md, Censoring at high flow); None otherwise."""
     C = as2d(np.asarray(candidate, dtype=float))
     n = C.shape[0]
     regression = ConditioningRegression(conditioning, time_positions, buffer=dependence_lag)
@@ -91,6 +97,8 @@ def cmi_calibration(
     accepted = 0
     for _ in range(n_surrogates):
         surrogate = fitted + resid[time_block_permutation(n, time_positions, dependence_lag, rng)]
+        if censor is not None:
+            surrogate = censor(surrogate)
         observed, null, p_value = test.sequential_p_value(
             surrogate, obs, conditioning, n_resamples, rng, time_positions, dependence_lag,
             stopping_exceedances(alpha, n_resamples), grid_step=grid_step)

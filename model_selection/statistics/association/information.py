@@ -1,13 +1,31 @@
 """
-KSG k-nearest-neighbour information estimators.
+k-nearest-neighbour estimators of (conditional) mutual information for
+continuous, discrete or mixed data.
 
-ksg_mi:  Kraskov, Stogbauer & Grassberger (2004), Algorithm 1: I(X;Y).
-ksg_cmi: Frenzel & Pompe (2007) conditional extension: I(X;Y|Z).
+knn_cmi: Mesner and Shalizi (2021), I(X;Y|Z), eqs. (14), (18), (19).
+knn_mi:  the same with Z empty, the mixture estimator of Gao et al. (2017).
 
-Both use the max-norm joint-space kNN distance, make no parametric or
-linearity assumption, and accept multivariate inputs. An empty
-conditioning set reduces ksg_cmi to ksg_mi, so the same estimator serves the
-unconditional first pick and every later conditional step of selection.
+The k-th neighbour distance rho_i is taken in the max-norm joint space. All
+counts exclude the sample itself and include samples at exactly rho_i
+(Mesner and Shalizi, 2021, eq. 14). k~_i counts the joint-space samples
+within rho_i (eq. 18). It exceeds k only where samples lie exactly at
+rho_i: where samples coincide, or where a point mass puts many samples at
+the same distance, as samples just above a censoring threshold are from
+every censored sample near them in Z. Each sample's term is
+    psi(k) - psi(n_xz) - psi(n_yz) + psi(n_z)    when k~_i = k,
+    log(k~_i) - log(n_xz) - log(n_yz) + log(n_z) otherwise (eq. 19),
+and the estimate is the mean of the terms. With Z empty, n_z is the number
+of other samples. The estimate is not clipped at zero: a permutation test
+compares it with null draws on the same scale.
+
+On continuous values k~_i = k almost surely, and the estimator differs from
+Frenzel and Pompe (2007) only in finite samples: it counts boundary samples
+and uses psi(n) where Frenzel and Pompe use psi(n + 1). On data with ties it
+remains consistent (Mesner and Shalizi, 2021, Theorem 3.1); the Frenzel-Pompe
+and KSG estimators do not, and adding noise to break the ties degrades them
+(Gao et al., 2017). Values on a regular grid, such as integer ranks, break
+the almost-sure equality: distinct samples then often lie exactly at rho_i,
+and eq. 18 counts them as it counts a point mass.
 Tree queries use `workers=-1` (all cores; scipy releases the GIL).
 """
 from __future__ import annotations
@@ -21,87 +39,38 @@ from model_selection.utils import as2d
 
 
 def _count_within(tree: cKDTree, points: np.ndarray, radii: np.ndarray, workers: int = -1) -> np.ndarray:
-    """Count neighbours (excluding the point itself) strictly within each
-    point's Chebyshev radius.
-    """
-    radii = np.asarray(radii, dtype=np.float64)
-    # query_ball_point returns points with distance <= r; KSG needs strict "<".
-    # Standard fix: shrink r by a small relative epsilon before counting.
-    shrunk = np.where(radii > 0, radii * (1 - 1e-12), 0.0)
-    counts = tree.query_ball_point(points, r=shrunk, p=np.inf, workers=workers, return_length=True)
+    """Count neighbours (excluding the point itself) within each point's
+    Chebyshev radius, boundary included."""
+    counts = tree.query_ball_point(points, r=np.asarray(radii, dtype=np.float64), p=np.inf, workers=workers,
+                                   return_length=True)
     return np.asarray(counts, dtype=np.int64) - 1  # exclude self
 
 
-def ksg_mi(x: np.ndarray, y: np.ndarray, k: int = 5, workers: int = -1) -> float:
-    """KSG Algorithm 1 estimate of I(X;Y) in nats.
-
-    x, y : (n,) or (n, d), already in the space MI should be computed in.
-    k    : joint-space neighbour count (5 is the usual bias/variance balance).
-    workers : passed to scipy tree queries (-1 = all cores).
-    """
-    x = as2d(x)
-    y = as2d(y)
-    n = x.shape[0]
-    if y.shape[0] != n:
-        raise ValueError("x and y must have the same number of samples")
-    if k >= n:
-        raise ValueError(f"k={k} must be < n_samples={n}")
-
-    joint = np.hstack([x, y])
-    joint_tree = cKDTree(joint)
-    # distance to kth neighbor (excluding self) in max-norm joint space
-    dists, _ = joint_tree.query(joint, k=k + 1, p=np.inf, workers=workers)
-    eps = dists[:, -1]
-
-    x_tree = cKDTree(x)
-    y_tree = cKDTree(y)
-    n_x = _count_within(x_tree, x, eps, workers=workers)
-    n_y = _count_within(y_tree, y, eps, workers=workers)
-
-    mi = digamma(k) - np.mean(digamma(n_x + 1) + digamma(n_y + 1)) + digamma(n)
-    return float(mi)
+def _terms(k: int, k_tilde: np.ndarray, n_xz: np.ndarray, n_yz: np.ndarray, n_z: np.ndarray) -> np.ndarray:
+    """Mesner and Shalizi (2021, eq. 19): digamma where no samples coincide
+    at the k-th neighbour distance (k~ = k), log otherwise. Counts are at
+    least 1, which matters only for a sample whose Theiler window leaves
+    fewer than k others; Mesner and Shalizi (2021, Section 4) apply the same
+    floor to the Frenzel-Pompe counts."""
+    cont = k_tilde == k
+    k_tilde, n_xz, n_yz, n_z = (np.maximum(a, 1) for a in (k_tilde, n_xz, n_yz, n_z))
+    return np.where(cont, digamma(k) - digamma(n_xz) - digamma(n_yz) + digamma(n_z),
+                    np.log(k_tilde) - np.log(n_xz) - np.log(n_yz) + np.log(n_z))
 
 
-def ksg_cmi(x: np.ndarray, y: np.ndarray, z: np.ndarray | None, k: int = 5, workers: int = -1) -> float:
-    """Frenzel & Pompe (2007) estimate of I(X;Y|Z) in nats; reduces to ksg_mi when
-    z is None or empty.
+def knn_cmi(x: np.ndarray, y: np.ndarray, z: np.ndarray | None, k: int = 5, workers: int = -1) -> float:
+    """Mesner and Shalizi (2021) estimate of I(X;Y|Z) in nats; with z None or
+    empty, the Gao et al. (2017) estimate of I(X;Y)."""
+    return float(CachedCMI(y, z, k=k, workers=workers)(x))
 
-    CMI = psi(k) + < psi(n_z+1) - psi(n_xz+1) - psi(n_yz+1) >, with the kth-NN
-    distance taken in the joint (X,Y,Z) space.
-    """
-    x = as2d(x)
-    y = as2d(y)
-    if z is None or (np.asarray(z).size == 0):
-        return ksg_mi(x, y, k=k, workers=workers)
-    z = as2d(z)
-    n = x.shape[0]
-    if not (y.shape[0] == n and z.shape[0] == n):
-        raise ValueError("x, y, z must have the same number of samples")
-    if k >= n:
-        raise ValueError(f"k={k} must be < n_samples={n}")
 
-    joint = np.hstack([x, y, z])
-    joint_tree = cKDTree(joint)
-    dists, _ = joint_tree.query(joint, k=k + 1, p=np.inf, workers=workers)
-    eps = dists[:, -1]
-
-    xz = np.hstack([x, z])
-    yz = np.hstack([y, z])
-
-    xz_tree = cKDTree(xz)
-    yz_tree = cKDTree(yz)
-    z_tree = cKDTree(z)
-
-    n_xz = _count_within(xz_tree, xz, eps, workers=workers)
-    n_yz = _count_within(yz_tree, yz, eps, workers=workers)
-    n_z = _count_within(z_tree, z, eps, workers=workers)
-
-    cmi = digamma(k) + np.mean(digamma(n_z + 1) - digamma(n_xz + 1) - digamma(n_yz + 1))
-    return float(cmi)
+def knn_mi(x: np.ndarray, y: np.ndarray, k: int = 5, workers: int = -1) -> float:
+    """Gao et al. (2017) estimate of I(X;Y) in nats (knn_cmi with Z empty)."""
+    return knn_cmi(x, y, None, k=k, workers=workers)
 
 
 class CachedCMI(CachedAssociationEstimator):
-    """ksg_cmi/ksg_mi with obs and conditioning fixed.
+    """knn_cmi/knn_mi with obs and conditioning fixed.
 
     The KD-trees that do not depend on the candidate (y, yz, z) are built once
     at construction; only the joint and xz trees are rebuilt per call. This is
@@ -148,11 +117,28 @@ class CachedCMI(CachedAssociationEstimator):
                 for i, lst in enumerate(lists):
                     self.excluded[i, :len(lst)] = lst
 
-    def _kth_distance(self, joint: np.ndarray) -> np.ndarray:
+    def _radius_and_k_tilde(self, joint: np.ndarray, tree: cKDTree) -> tuple[np.ndarray, np.ndarray]:
+        """rho, the distance to each sample's k-th nearest neighbour in the
+        joint space outside its Theiler window, and k~, the samples within rho
+        (Mesner and Shalizi, 2021, eq. 18). Without a Theiler window, k~ = k
+        exactly where the (k+1)-th neighbour lies beyond rho, so the joint
+        count is made only where it lies at rho."""
+        k, n = self.k, self.n
+        if self.excluded is None and k + 2 <= n:
+            dists, _ = tree.query(joint, k=k + 2, p=np.inf, workers=self.workers)
+            eps = dists[:, k]
+            k_tilde = np.full(n, k, dtype=np.int64)
+            at = dists[:, k + 1] <= eps
+            if np.any(at):
+                k_tilde[at] = _count_within(tree, joint[at], eps[at], workers=self.workers)
+            return eps, k_tilde
+        eps = self._kth_distance(joint, tree)
+        return eps, self._count(tree, joint, eps)
+
+    def _kth_distance(self, joint: np.ndarray, tree: cKDTree) -> np.ndarray:
         """Distance to each sample's k-th nearest neighbour in the joint space,
         among the samples outside its Theiler window."""
         k, n, workers = self.k, self.n, self.workers
-        tree = cKDTree(joint)
         if self.excluded is None:
             dists, _ = tree.query(joint, k=k + 1, p=np.inf, workers=workers)
             return dists[:, -1]
@@ -166,19 +152,20 @@ class CachedCMI(CachedAssociationEstimator):
         return eps
 
     def _count(self, tree: cKDTree, points: np.ndarray, eps: np.ndarray) -> np.ndarray:
-        """Neighbours strictly within each sample's radius, outside its Theiler window."""
+        """Neighbours within each sample's radius, boundary included, outside
+        its Theiler window."""
         counts = _count_within(tree, points, eps, workers=self.workers)
         if self.excluded is None:
             return counts
         valid = self.excluded >= 0
         diff = np.abs(points[np.where(valid, self.excluded, 0)] - points[:, None, :]).max(axis=2)
-        shrunk = np.where(eps > 0, eps * (1 - 1e-12), 0.0)
-        return counts - np.sum(valid & (diff <= shrunk[:, None]), axis=1)
+        return counts - np.sum(valid & (diff <= eps[:, None]), axis=1)
+
 
     def __call__(self, candidate: np.ndarray, obs: np.ndarray | None = None,
                  conditioning: np.ndarray | None = None) -> float:
         x = as2d(candidate)
-        k, n, workers = self.k, self.n, self.workers
+        k, n = self.k, self.n
         if x.shape[0] != n:
             raise ValueError("candidate must have the same number of samples as obs")
         if k >= n:
@@ -186,20 +173,17 @@ class CachedCMI(CachedAssociationEstimator):
 
         if self.z is None:
             joint = np.hstack([x, self.obs])
-            eps = self._kth_distance(joint)
+            eps, k_tilde = self._radius_and_k_tilde(joint, cKDTree(joint))
             n_x = self._count(cKDTree(x), x, eps)
             n_y = self._count(self.y_tree, self.obs, eps)
-            # Each sample's neighbours are drawn from the samples outside its window.
-            n_ref = n if self.excluded is None else n - np.sum(self.excluded >= 0, axis=1)
-            mi = digamma(k) - np.mean(digamma(n_x + 1) + digamma(n_y + 1)) + np.mean(digamma(n_ref))
-            return float(mi)
+            # With Z empty every other sample outside the window is within any radius.
+            n_z = (n - 1) if self.excluded is None else (n - 1 - np.sum(self.excluded >= 0, axis=1))
+            return float(np.mean(_terms(k, k_tilde, n_x, n_y, np.broadcast_to(n_z, n_x.shape))))
 
         joint = np.hstack([x, self.obs, self.z])
-        eps = self._kth_distance(joint)
+        eps, k_tilde = self._radius_and_k_tilde(joint, cKDTree(joint))
         xz = np.hstack([x, self.z])
         n_xz = self._count(cKDTree(xz), xz, eps)
         n_yz = self._count(self.yz_tree, self.yz, eps)
         n_z = self._count(self.z_tree, self.z, eps)
-
-        cmi = digamma(k) + np.mean(digamma(n_z + 1) - digamma(n_xz + 1) - digamma(n_yz + 1))
-        return float(cmi)
+        return float(np.mean(_terms(k, k_tilde, n_xz, n_yz, n_z)))

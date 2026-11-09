@@ -1,5 +1,5 @@
 """
-The high-flow pathway: model selection on high-flow events, one sample per
+The high-flow event pathway: model selection on high-flow events, one sample per
 event.
 
 1. Detect each series' own events (EventConfig.method) on all of that
@@ -203,7 +203,7 @@ def run_high_flow_analysis(
         rng: np.random.Generator | None = None,
         seasonal: SeasonalConfig | None = None,
 ) -> HighFlowResult:
-    """Run the high-flow pathway for one basin (see module docstring).
+    """Run the high-flow event pathway for one basin (see module docstring).
 
     seasonal : the series preparation used to estimate the dependence lag
         (default: calendar-day mean removed, as in the pooled pathway); the
@@ -239,8 +239,7 @@ def run_high_flow_analysis(
     min_temporal_lag = selection.min_temporal_lag
     if min_temporal_lag is None:
         window = seasonal.window_days if seasonal.enabled else None
-        prepared = {name: prepare_series(s.values.astype(float), rng=rng,
-                                         index=s.index, seasonal_window_days=window)
+        prepared = {name: prepare_series(s.values.astype(float), index=s.index, seasonal_window_days=window)
                     for name, s in basin.formulations.items()}
         min_temporal_lag, per_formulation = max_decorrelation_lag(prepared, selection.dependence_run_length)
         prep = (f"with their calendar-day means removed ({seasonal.window_days}-day window)"
@@ -254,15 +253,14 @@ def run_high_flow_analysis(
     else:
         notes.append(f"min_temporal_lag={min_temporal_lag} (caller-specified).")
     if output.dependence_plot and output.output_dir is not None:
-        # A separate random stream for the plot's preparation, so the analysis' draws are unchanged.
-        plot_rng = np.random.default_rng(0)
         window = seasonal.window_days if seasonal.enabled else None
-        plotted = {name: prepare_series(s.values.astype(float), rng=plot_rng, index=s.index, seasonal_window_days=window)
+        plotted = {name: prepare_series(s.values.astype(float), index=s.index, seasonal_window_days=window)
                    for name, s in basin.formulations.items()}
-        plotted_obs = prepare_series(basin.obs.values.astype(float), rng=plot_rng, index=basin.obs.index,
+        plotted_obs = prepare_series(basin.obs.values.astype(float), index=basin.obs.index,
                                      seasonal_window_days=window)
         write_dependence_plot(output, gage, plotted, plotted_obs, basin.obs.index, selection.dependence_run_length,
-                              window)
+                              window, raw={name: s.values.astype(float) for name, s in basin.formulations.items()},
+                              raw_observations=basin.obs.values.astype(float))
     notes.append(f"Per-series event detection: method={events.method!r}"
                  + (f", {events.pot}" if events.method == "pot" else f", {events.wasp}") + ".")
     notes.append("Consensus events: high-flow runs joined when at least half of the formulations' own events span "
@@ -434,15 +432,17 @@ def run_high_flow_analysis(
                         f"events share a cluster (largest {dependence_record['largest_cluster']}). Events in different "
                         "clusters are treated as independent, and every test keeps a cluster together.")
 
-                hf_n_neighbors = min(selection.n_neighbors, max(2, n_fpc_events - 1))
+                # The neighbourhood counts the event itself (CMITest.n_neighbors).
+                hf_n_neighbors = min(selection.n_neighbors, max(2, n_fpc_events))
                 if hf_n_neighbors < selection.n_neighbors:
                     notes.append(f"high-flow permutation neighbourhood clamped to {hf_n_neighbors} from "
                                  f"{selection.n_neighbors}: only {n_fpc_events} event samples.")
 
                 # The free-form tier's Theiler window must leave every event enough
-                # permutation partners. Only the local permutation needs the shorter
-                # window; every other test keeps the full dependence lag.
-                partner_floor = min(hf_n_neighbors, 5)
+                # permutation partners (other events) to fill a neighbourhood of the
+                # default size. Only the local permutation needs the shorter window;
+                # every other test keeps the full dependence lag.
+                partner_floor = min(hf_n_neighbors - 1, 4)
                 min_valid = _min_valid_neighbor_count(time_positions, test_lag)
                 theiler_window = None
                 if clusters is None and min_valid < partner_floor:

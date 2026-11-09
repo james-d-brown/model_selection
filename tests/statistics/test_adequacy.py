@@ -427,6 +427,21 @@ def test_median_heuristic_bandwidth_is_positive_and_scale_sensitive():
     assert bw_large > bw_small  # larger-spread data -> larger bandwidth
 
 
+def test_median_heuristic_bandwidth_leaves_out_tied_pairs():
+    """A censored series is mostly tied at its threshold: the bandwidth is the
+    median distance between distinct values, not zero; without ties it is
+    the median over all pairs (docs/methods.md, Nonlinear tier)."""
+    from scipy.spatial.distance import pdist
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=(400, 1))
+    assert median_heuristic_bandwidth(x) == pytest.approx(np.median(pdist(x)))
+    c = np.maximum(x, np.quantile(x, 0.9))                    # 90% tied: the median over all pairs is zero
+    assert np.median(pdist(c)) == 0.0
+    d = pdist(c)
+    assert median_heuristic_bandwidth(c) == pytest.approx(np.median(d[d > 0]))
+    assert median_heuristic_bandwidth(np.ones((10, 1))) == 1.0
+
+
 def test_rbf_kernel_diagonal_is_one_and_symmetric():
     rng = np.random.default_rng(21)
     X = rng.normal(size=(50, 2))

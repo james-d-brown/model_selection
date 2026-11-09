@@ -45,7 +45,7 @@ def make_synthetic_basin(n_hours=3 * 8760, n_events=None, seed=0):
 def make_synthetic_basin_with_gap(n_hours=3 * 8760, n_events=None, seed=0, gap_start=1500, gap_hours=48):
     """Same construction as make_synthetic_basin, but with a genuine,
     multi-hour data gap spliced into every series' own index -- for
-    testing the regularize-before-detection step of the high-flow pathway."""
+    testing the regularize-before-detection step of the high-flow event pathway."""
     basin = make_synthetic_basin(n_hours=n_hours, n_events=n_events, seed=seed)
     idx = basin.obs.index
     keep_mask = ~((idx >= idx[gap_start]) & (idx < idx[gap_start] + pd.Timedelta(hours=gap_hours)))

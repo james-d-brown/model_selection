@@ -35,6 +35,8 @@ from model_selection.statistics.significance.block_length import (
 )
 from model_selection.utils import as2d
 
+MULTIPLIER_CHUNK = 64  # bootstrap draws generated at a time, to bound memory on long records
+
 
 class NonlinearResidualTest(ConditionalIndependenceTest):
     """Residual cross-covariance of kernel feature maps after kernel ridge
@@ -204,8 +206,24 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
              for nm in names],
             self.run_length, grid_step)
         block = resolved.length
-        weights = dependent_wild_weights(time_positions, block, n_resamples, rng)
+        # All candidates share one set of multipliers. They are generated in
+        # chunks of draws, and regenerated for each candidate from the same
+        # generator state, so that only one chunk and one candidate's terms are
+        # held at a time; the draws are those of a single generation of all
+        # n_resamples at once.
+        start_state = rng.bit_generator.state
 
+        def weight_chunks():
+            gen = np.random.Generator(type(rng.bit_generator)())
+            gen.bit_generator.state = start_state
+            for start in range(0, n_resamples, MULTIPLIER_CHUNK):
+                stop = min(start + MULTIPLIER_CHUNK, n_resamples)
+                yield start, stop, dependent_wild_weights(time_positions, block, stop - start, gen)
+            rng.bit_generator.state = gen.bit_generator.state
+
+        if not names:                                  # the generator advances as for any draws
+            for _ in weight_chunks():
+                pass
         observed = np.empty(len(names))
         null = np.empty((n_resamples, len(names)))
         diagnostics = {}
@@ -216,15 +234,19 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
                 total, Fc, denom = feature_terms(E_c)
             else:
                 A, P, denom = centred_products(E_c)
+            for start, stop, weights in weight_chunks():
+                if denom > 0 and features:
+                    null[start:stop, j] = np.sum((weights @ Fc) ** 2, axis=1) / denom
+                elif denom > 0:
+                    null[start:stop, j] = np.einsum("bi,bi->b", weights @ P, weights) / denom
+                else:
+                    null[start:stop, j] = 0.0
             if denom > 0 and features:
                 observed[j] = float(total @ total) / denom
-                null[:, j] = np.sum((weights @ Fc) ** 2, axis=1) / denom
             elif denom > 0:
                 observed[j] = float(A.sum()) / denom
-                null[:, j] = np.einsum("bi,bi->b", weights @ P, weights) / denom
             else:
                 observed[j] = 0.0
-                null[:, j] = 0.0
             diagnostics[nm] = {
                 "r2_candidate_on_selected": r2_c,
                 "r2_obs_on_selected": r2_o,

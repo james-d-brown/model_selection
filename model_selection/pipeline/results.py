@@ -13,6 +13,7 @@ from model_selection.statistics.significance.block_length import (
 )
 
 POOLED_RESULT_JSON_FILENAME_TEMPLATE = "{gage}_pooled_result.json"
+POOLED_CENSORED_RESULT_JSON_FILENAME_TEMPLATE = "{gage}_pooled_censored_result.json"
 HIGH_FLOW_RESULT_JSON_FILENAME_TEMPLATE = "{gage}_high_flow_result.json"
 
 
@@ -40,6 +41,10 @@ class PooledResult:
     seed: int | None = None
     meaningful_r2: float | None = None
     cmi_calibration: bool = True
+    censoring: dict | None = None
+    """With censoring at high flow: the quantile, each series' threshold
+    (on its normal scores) and the share of each series at it; None for the
+    uncensored pathway."""
     pearson_correlation: dict = field(default_factory=dict)
     """Each formulation's Pearson correlation with the observed flow at every
     complete time step; reported only, for comparison."""
@@ -50,7 +55,7 @@ class PooledResult:
 
 @dataclass
 class HighFlowResult:
-    """Outcome of the high-flow pathway (one sample per event).
+    """Outcome of the high-flow event pathway (one sample per event).
 
     selection is None when there were too few usable events. n_components
     is the fitted component count. requires_closer_inspection is set when
@@ -109,10 +114,12 @@ class HighFlowResult:
 
 @dataclass
 class BasinResult:
-    """Both pathways for one basin (high_flow is None if not run)."""
+    """Every pathway run for one basin (high_flow and pooled_censored are
+    None if not run)."""
     gage: str
     pooled: PooledResult
     high_flow: HighFlowResult | None = None
+    pooled_censored: PooledResult | None = None
 
     @property
     def zero_flow_flag(self) -> bool:
@@ -176,8 +183,8 @@ def _dependence_flags(where: str, sources: list[tuple[str, dict | None]]) -> lis
                 f"{dep.get('n_blocks', 0):.0f} blocks, fewer than the minimum of {MIN_BLOCKS} (a convention). "
                 "At the estimated block length the null's variance is then expected to be about "
                 f"{100 * expected_variance_shortfall(dep.get('n_blocks', 1)):.0f}% too small, so the test tends "
-                "to reject too often; the record is short for its dependence (docs/methods.md, Temporal "
-                "dependence).")})
+                "to reject too often; the record is short for its dependence (docs/methods.md, Dependence "
+                "between samples).")})
         if not dep.get("dependence_decays", True):
             flags.append({"code": "dependence_not_decaying", "message": (
                 f"{where}, {what}: the residual products remained significantly "
@@ -204,10 +211,10 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
     meaningful_effect_undetectable : the data cannot detect contributions as
         small as SelectionConfig.meaningful_r2 with 80% power (docs/methods.md,
         Detectable effect and the meaningful-effect threshold).
-    wasp_scale_range_too_short : high-flow pathway with the WASP detector: a
+    wasp_scale_range_too_short : high-flow event pathway with the WASP detector: a
         formulation's scale ceiling leaves too few smoothing scales to
         resolve any events (docs/methods.md, Event detection methods).
-    low_ensemble_representation, basis_sensitivity : high-flow pathway only
+    low_ensemble_representation, basis_sensitivity : high-flow event pathway only
         (docs/methods.md, Samples).
     dependence_not_decaying : in a step's test or check, the residual
         products' autocorrelation did not become insignificant within the
@@ -262,6 +269,10 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         power: the stop reflects too few samples, not an absence of
         information.
 
+    thinning_limits_detection : selection stopped in a tier that ran on a
+        subsample of the record (the pooled nonlinear and CMI tiers) at a
+        round whose smallest detectable R^2 exceeds the margin there but not
+        on the whole record (docs/methods.md, Dependence between samples).
     event_terms_correlated : in a step on high-flow events in clusters,
         the terms of the statistic were correlated between consecutive
         clusters (docs/methods.md, Dependence between samples).
@@ -335,6 +346,22 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
             f"threshold when set, otherwise the acceptance floor). The stop then reflects too few samples, not an "
             f"absence of information. Selections discarded by a validity escalation, for information only: "
             f"{provisional}.")})
+    thin = stop.thinning if stop is not None else None
+    if (thin is not None and stop.detectable_r2 is not None and stop.detectable_r2 > margin
+            and thin["detectable_r2_record"] <= margin):
+        retained = thin["information_retained"]
+        flags.append({"code": "thinning_limits_detection", "message": (
+            f"selection stopped in the {stop.tier} tier, which ran on {thin['n_samples']} of the record's "
+            f"{thin['n_samples_record']} samples: its smallest detectable R^2 there is "
+            f"{format_share(stop.detectable_r2)}, above the margin of {format_share(margin)}, while on the whole "
+            f"record it would be {format_share(thin['detectable_r2_record'])}, within it. The subsample keeps about "
+            + (f"{100 * retained:.0f}%" if retained is not None else "an unknown share")
+            + " of the record's effective samples. The stop then reflects the thinning, not an absence of "
+            "information. "
+            + ("A larger sample for the tier (SelectionConfig.nonlinear_max_n) may detect what this one cannot"
+               if stop.tier == "nonlinear" else
+               "The tier's samples are at least one dependence lag apart, at most SelectionConfig.cmi_max_n of them")
+            + " (docs/methods.md, Dependence between samples).")})
     if sel is not None:
         for i, step in enumerate(sel.trajectory, start=1):
             if step.low_samples_per_dimension:
@@ -446,6 +473,7 @@ def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> di
                 "low_samples_per_dimension": st.low_samples_per_dimension,
                 "detectable_r2": st.detectable_r2,
                 "effective_sample_size": st.effective_sample_size,
+                "thinning": st.thinning,
                 "detectability": (describe_detectable(st.detectable_r2, n_features)
                                   if st.detectable_r2 is not None else None),
             }
@@ -489,6 +517,7 @@ def pooled_result_to_dict(result: PooledResult) -> dict:
         "cmi_calibration": result.cmi_calibration,
         "meaningful_r2": result.meaningful_r2,
         "seasonal_conditioning": result.seasonal_conditioning,
+        "censoring": result.censoring,
         "ill_posed": sel.ill_posed,
         "ill_posed_reason": sel.ill_posed_reason,
         "detectability": (describe_detectable(sel.trajectory[0].detectable_r2)
@@ -571,6 +600,8 @@ def basin_result_to_dict(result: BasinResult) -> dict:
     flags = [{"pathway": "pooled", **f} for f in review_flags(result.pooled)]
     if result.high_flow is not None:
         flags += [{"pathway": "high_flow", **f} for f in review_flags(result.high_flow)]
+    if result.pooled_censored is not None:
+        flags += [{"pathway": "pooled_censored", **f} for f in review_flags(result.pooled_censored)]
     return {
         "review_required": bool(flags),
         "review_flags": flags,
@@ -579,6 +610,8 @@ def basin_result_to_dict(result: BasinResult) -> dict:
         "zero_flow_fraction": result.zero_flow_fraction,
         "pooled": pooled_result_to_dict(result.pooled),
         "high_flow": high_flow_result_to_dict(result.high_flow) if result.high_flow is not None else None,
+        "pooled_censored": (pooled_result_to_dict(result.pooled_censored)
+                            if result.pooled_censored is not None else None),
     }
 
 
@@ -615,24 +648,32 @@ def _pathway_outcome(label: str, result) -> str:
     return text
 
 
-def outcome_line(pooled: "PooledResult | None" = None, high_flow: "HighFlowResult | None" = None) -> str:
+def outcome_line(pooled: "PooledResult | None" = None, high_flow: "HighFlowResult | None" = None,
+                 pooled_censored: "PooledResult | None" = None) -> str:
     """The outcome of a basin's selection in one line: for each pathway run,
     the selected set, whether any selected formulation could be replaced by
     another (docs/methods.md, Interchangeable formulations), and the largest
-    further contribution that would go undetected; with both pathways, the
-    union of their selected sets."""
-    gage = (pooled or high_flow).gage
-    parts = []
+    further contribution that would go undetected; with more than one run,
+    the union of their selected sets. pooled_censored is a pooled run with
+    censoring at high flow; a censored result passed as pooled is labelled
+    as censored too."""
+    gage = (pooled or high_flow or pooled_censored).gage
+    runs = []
     if pooled is not None:
-        parts.append(_pathway_outcome("pooled", pooled))
+        runs.append(("pooled, censored" if pooled.censoring else "pooled", pooled))
+    if pooled_censored is not None:
+        if not pooled_censored.censoring:
+            raise ValueError("pooled_censored must be a result of the pooled pathway run with censoring")
+        runs.append(("pooled, censored", pooled_censored))
     if high_flow is not None:
-        parts.append(_pathway_outcome("high-flow", high_flow))
-    line = f"{gage}: " + " | ".join(parts)
-    if pooled is not None and high_flow is not None:
+        runs.append(("high-flow", high_flow))
+    line = f"{gage}: " + " | ".join(_pathway_outcome(name, res) for name, res in runs)
+    if len(runs) > 1:
         union = []
-        for res in (pooled, high_flow):
+        for _, res in runs:
             for st in (res.selection.trajectory if res.selection is not None else []):
                 if st.accepted and st.formulation not in union:
                     union.append(st.formulation)
-        line += f" | both pathways: {{{', '.join(union)}}}"
+        together = "both pathways" if len(runs) == 2 else "all runs"
+        line += f" | {together}: {{{', '.join(union)}}}"
     return line

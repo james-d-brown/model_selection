@@ -19,7 +19,7 @@ effect-size floor (see docs/methods.md, The three tiers).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
@@ -37,6 +37,9 @@ from model_selection.statistics.conditional_independence import (
     CMITest, ConditionalIndependenceTest, LinearResidualTest, NonlinearResidualTest,
 )
 from model_selection.utils import as2d
+
+if TYPE_CHECKING:
+    from model_selection.preprocessing.censoring import CensoredSeries
 
 AdequacyPlotFactory = Callable[[str, str], "Callable | None"]
 """(plot_kind, tier_name) -> plot function or None (see
@@ -86,6 +89,20 @@ class SelectionSample:
         clusters of dependent samples (high-flow events; time_positions are
         then cluster coordinates, statistics.significance.clusters); None
         otherwise.
+    conditioning : {formulation: values} a formulation takes when it is in
+        the conditioning set, where they differ from its values as a
+        candidate; None when they do not. With censoring at high flow the
+        candidates are censored and the conditioning values are not
+        (docs/methods.md, Censoring at high flow).
+    censored : the candidates' uncensored values and censoring thresholds
+        when the candidates and observations are censored
+        (preprocessing.censoring.CensoredSeries), so that the CMI tier's
+        surrogate candidates can be built uncensored and then censored;
+        None otherwise.
+    thinned_from : the record this sample was thinned from, when a tier runs
+        on a subsample of it (the pooled pathway's nonlinear and CMI tiers),
+        so that the information lost by thinning can be measured; None
+        otherwise.
     """
     candidates: dict[str, np.ndarray]
     obs: np.ndarray
@@ -98,6 +115,42 @@ class SelectionSample:
     partialled_covariates: np.ndarray | None = None
     partialled_df: float = 0.0
     clusters: np.ndarray | None = None
+    conditioning: dict[str, np.ndarray] | None = None
+    censored: CensoredSeries | None = None
+    thinned_from: "SelectionSample | None" = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        if self.conditioning is not None and set(self.conditioning) != set(self.candidates):
+            raise ValueError("conditioning must have the same formulations as candidates")
+        if self.censored is not None and set(self.censored.uncensored) != set(self.candidates):
+            raise ValueError("censored must have the same formulations as candidates")
+
+    @property
+    def conditioning_series(self) -> dict[str, np.ndarray]:
+        """The values each formulation takes in the conditioning set."""
+        return self.candidates if self.conditioning is None else self.conditioning
+
+    def surrogate_source(self, name: str) -> tuple[np.ndarray, Callable | None]:
+        """(values, censor) for the CMI tier's surrogate candidates of `name`:
+        its values and None, or, with censoring, its uncensored values and the
+        function that censors a surrogate at its threshold."""
+        if self.censored is None:
+            return self.candidates[name], None
+        return self.censored.uncensored[name], lambda values: self.censored.censor(name, values)
+
+    def subset(self, idx: np.ndarray, time_positions: np.ndarray, grid_step: float | None) -> "SelectionSample":
+        """The sample at rows idx (a subsample of the record), with the given
+        positions and grid step; every row-aligned field is subset alike."""
+        from dataclasses import replace
+        rows = lambda d: None if d is None else {k: v[idx] for k, v in d.items()}
+        return replace(
+            self, candidates=rows(self.candidates), obs=self.obs[idx], time_positions=time_positions,
+            grid_step=grid_step, covariates=None if self.covariates is None else self.covariates[idx],
+            partialled_covariates=None if self.partialled_covariates is None else self.partialled_covariates[idx],
+            clusters=None if self.clusters is None else self.clusters[idx],
+            conditioning=rows(self.conditioning),
+            censored=None if self.censored is None else self.censored.subset(idx),
+            thinned_from=self.thinned_from if self.thinned_from is not None else self)
 
 
 def partial_out_covariates(sample: SelectionSample) -> SelectionSample:
@@ -112,6 +165,8 @@ def partial_out_covariates(sample: SelectionSample) -> SelectionSample:
     own covariates are returned unchanged when there are none."""
     if sample.covariates is None or np.asarray(sample.covariates).size == 0:
         return sample
+    if sample.conditioning is not None or sample.censored is not None:
+        raise ValueError("partial_out_covariates does not support separate conditioning values or censoring")
     from dataclasses import replace
     from model_selection.statistics.regression.kernel_residuals import ConditioningRegression
     V = as2d(np.asarray(sample.covariates, dtype=float))
@@ -255,11 +310,11 @@ def build_tier(
 def _cmi_calibration(tier: Tier, selection: SelectionConfig) -> Callable:
     """The CMI tier's calibration on surrogate candidates for one state
     (statistics.conditional_independence.calibration)."""
-    def _calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None):
+    def _calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, censor=None):
         return cmi_calibration(tier.test, candidate, obs, conditioning, time_positions, dependence_lag,
                                selection.alpha, tier.effect_size_floor, rng,
                                rate_ratio=selection.cmi_calibration_rate_ratio,
-                               grid_step=grid_step)
+                               grid_step=grid_step, censor=censor)
     return _calibrate
 
 
@@ -294,11 +349,15 @@ def _guard_on_own_sample(cmi: Tier) -> Callable | None:
     if cmi.sample is None:
         return lambda *args, names=None, **kwargs: cmi.calibration(*args, **kwargs)
 
-    def _guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None):
+    def _guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
+               censor=None):
         own = cmi.sample
         name, selected = names
-        parts = ([] if own.covariates is None else [as2d(own.covariates)]) + [as2d(own.candidates[s]) for s in selected]
+        parts = (([] if own.covariates is None else [as2d(own.covariates)])
+                 + [as2d(own.conditioning_series[s]) for s in selected])
         z = np.hstack(parts) if parts else None
-        return cmi.calibration(own.candidates[name], own.obs, z, own.time_positions, own.dependence_lag, rng,
-                               grid_step=own.grid_step)
+        values, own_censor = own.surrogate_source(name)
+        extra = {} if own_censor is None else {"censor": own_censor}
+        return cmi.calibration(values, own.obs, z, own.time_positions, own.dependence_lag, rng,
+                               grid_step=own.grid_step, **extra)
     return _guard

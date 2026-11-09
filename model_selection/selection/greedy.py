@@ -44,6 +44,7 @@ from model_selection.statistics.significance.clusters import consecutive_cluster
 from model_selection.statistics.regression.linear import ols_fit
 from model_selection.utils import as2d
 
+THINNING_STREAM = 0x7417  # seed of the thinning measure's own null draws (_thinning_record)
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +90,10 @@ class SelectionStep:
     and the other tiers have less power. block_length is the block length (or
     multiplier bandwidth) the significance test's resampling used, and
     dependence how it was obtained (docs/methods.md, Dependence between samples).
+    thinning: when the tier ran on a subsample of the record, the same
+    effective sample size and detectable R^2 on the whole record, and the
+    share of the record's effective samples the subsample keeps
+    (_thinning_record; docs/methods.md, Dependence between samples).
     """
     formulation: str
     association: float
@@ -112,6 +117,7 @@ class SelectionStep:
     low_samples_per_dimension: bool = False
     detectable_r2: float | None = None
     effective_sample_size: float | None = None
+    thinning: dict | None = None
     block_length: int | None = None
     dependence: dict | None = None
 
@@ -180,6 +186,38 @@ def _stack_selected(candidate_series: dict, selected: list[str],
     formulations' values; None when both are empty."""
     parts = ([] if covariates is None else [as2d(covariates)]) + [as2d(candidate_series[s]) for s in selected]
     return np.hstack(parts) if parts else None
+
+
+def _censor_kwarg(censor) -> dict:
+    """The `censor` argument of a calibration call, passed only for a
+    censored sample, so the uncensored call is unchanged."""
+    return {} if censor is None else {"censor": censor}
+
+
+def _thinning_record(record: SelectionSample, selected: list[str], winner: str, n_eff: float, n: int,
+                     n_permutations: int, alpha: float, k_partialled: float, round_no: int,
+                     run_length: int) -> dict:
+    """The information a tier's subsample keeps of the whole record, for the
+    step's winner: the effective sample size and smallest detectable R^2 of
+    the linear tier's test on the whole record, computed as for the step's
+    own sample (statistics.power), and the share of the record's effective
+    samples the subsample keeps (docs/methods.md, Dependence
+    between samples). The record's null draws come from a fixed random stream of
+    their own, so the selection's draws are unchanged."""
+    z_full = _stack_selected(record.conditioning_series, selected, record.covariates)
+    values, obs = record.candidates[winner], record.obs
+    k_y, k_x = as2d(obs).shape[1], as2d(values).shape[1]
+    k_c = (0 if z_full is None else z_full.shape[1]) + k_partialled
+    n_full = len(obs)
+    t = record.time_positions if record.time_positions is not None else np.arange(n_full)
+    null = LinearResidualTest(run_length=run_length).run(
+        {winner: values}, obs, z_full, n_permutations, np.random.default_rng([THINNING_STREAM, round_no]), t,
+        record.dependence_lag, grid_step=record.grid_step).null[:, 0]
+    n_eff_full = effective_sample_size(n_full, null, k_y, k_x, k_c)
+    return {"n_samples": int(n), "n_samples_record": int(n_full), "effective_sample_size": float(n_eff),
+            "effective_sample_size_record": float(n_eff_full),
+            "information_retained": float(min(1.0, n_eff / n_eff_full)) if n_eff_full > 0 else None,
+            "detectable_r2_record": minimum_detectable_r2(n_eff_full, k_y, k_x, k_c, alpha)}
 
 
 def _calibration_summary(calibration: dict) -> str:
@@ -264,7 +302,7 @@ def greedy_forward_selection(
         if max_selected is not None and len(selected) >= max_selected:
             stopped_reason = f"reached max_selected={max_selected}"
             break
-        z = _stack_selected(candidates, selected, sample.covariates)
+        z = _stack_selected(sample.conditioning_series, selected, sample.covariates)
         # With the covariates removed from every series (partial_out_covariates), the relationship checks and
         # their plots still condition on them, and the adjustment test's interaction part uses them.
         partialled = sample.partialled_covariates
@@ -404,8 +442,9 @@ def greedy_forward_selection(
         # on the sample (statistics.conditional_independence.calibration).
         calibration = None
         if accepted and tier.calibration is not None and z is not None:
-            calibration = tier.calibration(winner_values, obs, z, time_positions, lag, rng.spawn(1)[0],
-                                           grid_step=sample.grid_step)
+            source, censor = sample.surrogate_source(winner)
+            calibration = tier.calibration(source, obs, z, time_positions, lag, rng.spawn(1)[0],
+                                           grid_step=sample.grid_step, **_censor_kwarg(censor))
             accepted = calibration["calibrated"]
         n_dims = as2d(winner_values).shape[1] + as2d(obs).shape[1] + (0 if z is None else z.shape[1]) + k_partialled
         samples_per_dimension = n / n_dims
@@ -421,6 +460,9 @@ def greedy_forward_selection(
                 grid_step=sample.grid_step).null[:, 0]
         n_eff = effective_sample_size(n, linear_null, k_y, k_x, k_c)
         detectable_r2 = minimum_detectable_r2(n_eff, k_y, k_x, k_c, alpha)
+        thinning = (None if sample.thinned_from is None else
+                    _thinning_record(sample.thinned_from, selected, winner, n_eff, n, n_permutations, alpha,
+                                     k_partialled, round_no, getattr(tier.test, "run_length", DEFAULT_RUN_LENGTH)))
         trajectory.append(SelectionStep(
             formulation=winner, association=float(result.observed[w]), p_value=p_value, accepted=accepted, tier=tier.name,
             n_selected_before=len(selected), n_candidates_tested=len(remaining), dependence_lag=lag,
@@ -434,6 +476,7 @@ def greedy_forward_selection(
             low_samples_per_dimension=bool(samples_per_dimension < min_samples_per_dimension),
             detectable_r2=detectable_r2,
             effective_sample_size=n_eff,
+            thinning=thinning,
             cmi_calibration=calibration,
         ))
         if sample.clusters is not None:
@@ -521,9 +564,10 @@ def greedy_forward_selection(
                 # sample, for the candidate that leads there; otherwise no tier
                 # whose assumptions hold can make the selection.
                 if tier.escalation_guard is not None and z is not None:
+                    source, censor = sample.surrogate_source(nm)
                     step.cmi_calibration = tier.escalation_guard(
-                        candidates[nm], obs, z, time_positions, lag, rng.spawn(1)[0], grid_step=sample.grid_step,
-                        names=(nm, list(selected)))
+                        source, obs, z, time_positions, lag, rng.spawn(1)[0], grid_step=sample.grid_step,
+                        names=(nm, list(selected)), **_censor_kwarg(censor))
                     if not step.cmi_calibration["calibrated"]:
                         unsupported = (f"the CMI tier, to which the departure leads, is not calibrated on its "
                                        f"sample ({_calibration_summary(step.cmi_calibration)})")

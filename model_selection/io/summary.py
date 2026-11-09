@@ -11,13 +11,16 @@ SUMMARY_COLUMNS = ("review_required", "gage", "pathway", "flag_codes", "tier", "
 
 
 def summarize_result_files(root: str) -> list[dict]:
-    """One row per pooled or high-flow result JSON found under `root`
-    (recursively), rows requiring review first, then by gage and pathway."""
+    """One row per pooled (uncensored or censored at high flow) or high-flow
+    result JSON found under `root` (recursively), rows requiring review
+    first, then by gage and pathway."""
     rows = []
     for path in sorted(pathlib.Path(root).rglob("*_result.json")):
         name = path.name
         if name.endswith("_pooled_result.json"):
             pathway, prefix = "pooled", "pooled_"
+        elif name.endswith("_pooled_censored_result.json"):
+            pathway, prefix = "pooled_censored", "pooled_"
         elif name.endswith("_high_flow_result.json"):
             pathway, prefix = "high_flow", "high_flow_"
         else:

@@ -4,7 +4,7 @@ Hydrologic event detection.
 Per-series detection methods (pot, wasp) implement the common
 EventDetector interface (base); detect.detect_events_for_series is the single
 entry point. consensus and windows combine per-series events across model
-formulations into the consensus events used by the high-flow pathway.
+formulations into the consensus events used by the high-flow event pathway.
 
 See docs/methods.md, Event detection methods.
 """

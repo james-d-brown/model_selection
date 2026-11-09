@@ -1,4 +1,4 @@
-"""The event-merging diagnostic agrees with the high-flow pathway's own event
+"""The event-merging diagnostic agrees with the high-flow event pathway's own event
 construction and its stage counts are consistent."""
 import numpy as np
 

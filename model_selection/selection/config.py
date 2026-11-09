@@ -66,11 +66,12 @@ class SelectionConfig:
         recommends 0.1 to 0.2 (docs/methods.md, Free-form tier).
     cmi_k : fixed neighbour count overriding cmi_k_fraction; None (default)
         uses the fraction.
-    n_neighbors : local-permutation neighbourhood size (CMI tier); Runge
-        (2018) recommends 5 to 10.
+    n_neighbors : local-permutation neighbourhood size (CMI tier), counting
+        the sample itself, which may keep its own value; Runge (2018)
+        recommends 5 to 10, and 5 is his implementation's default.
     theiler_window : the CMI tier's Theiler window: neighbours closer than
         this in time are not local-permutation partners (Theiler, 1986).
-        None (default) uses the dependence lag. The high-flow pathway sets a
+        None (default) uses the dependence lag. The high-flow event pathway sets a
         shorter window when the dependence lag would leave an event too few
         partners; every other use of the dependence lag keeps the full lag.
     cmi_max_n : largest pooled sample the CMI tier is run on. Its local
@@ -132,7 +133,7 @@ class SelectionConfig:
     min_temporal_lag: int | None = None
     cmi_k_fraction: float = 0.1
     cmi_k: int | None = None
-    n_neighbors: int = 10
+    n_neighbors: int = 5
     theiler_window: int | None = None
     cmi_max_n: int = 2000
     nonlinear_max_n: int = field(default_factory=lambda: DEFAULT_NONLINEAR_MAX_N)

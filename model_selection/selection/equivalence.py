@@ -134,7 +134,7 @@ class _Context:
         self.lag, self.grid_step = sample.dependence_lag, sample.grid_step
 
     def z(self, names: list[str]):
-        return _stack_selected(self.candidates, names, self.sample.covariates)
+        return _stack_selected(self.sample.conditioning_series, names, self.sample.covariates)
 
     def adds(self, name, values, z, n_permutations, rng, alpha, n_eff) -> dict:
         return _adds(self.tier, name, values, self.obs, z, n_permutations, rng, self.time_positions, self.lag,
@@ -188,7 +188,8 @@ def information_equivalence(
         def compare(job):
             c, stream = job
             forward = ctx.adds(c, candidates[c], z_with_winner, n_permutations, stream, alpha, n_eff)
-            z_with_c = as2d(candidates[c]) if z is None else np.hstack([z, as2d(candidates[c])])
+            c_conditioning = as2d(ctx.sample.conditioning_series[c])
+            z_with_c = c_conditioning if z is None else np.hstack([z, c_conditioning])
             reverse = ctx.adds(winner, candidates[winner], z_with_c, n_permutations, stream, alpha, n_eff)
             return {
                 "candidate": c,

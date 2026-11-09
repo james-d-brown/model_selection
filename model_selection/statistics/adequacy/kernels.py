@@ -9,14 +9,23 @@ from model_selection.utils import as2d
 
 def median_heuristic_bandwidth(X: np.ndarray) -> float:
     """Median-heuristic RBF bandwidth (Gretton et al. 2012): the median of
-    all pairwise Euclidean distances between rows of X; 1.0 if degenerate."""
+    the Euclidean distances between pairs of distinct rows of X; 1.0 if all
+    rows are equal.
+
+    Pairs at distance zero are left out. The heuristic sets the bandwidth at
+    the typical distance between points; tied values add no distance to
+    measure. Where ties make up more than half the pairs, as for a series
+    censored at a high quantile (preprocessing.censoring), the median over
+    all pairs would be zero. Without ties the two medians are the same.
+    """
     from scipy.spatial.distance import pdist
 
     X = as2d(np.asarray(X, dtype=float))
     if X.shape[0] < 2:
         return 1.0
-    med = float(np.median(pdist(X)))
-    return med if med > 0 else 1.0
+    d = pdist(X)
+    d = d[d > 0]
+    return float(np.median(d)) if d.size else 1.0
 
 
 def rbf_kernel(X: np.ndarray, bandwidth: float) -> np.ndarray:

@@ -40,6 +40,14 @@ def test_summary_lists_flagged_results_first(tmp_path):
     assert open(out).read().splitlines()[0].startswith("review_required,gage,pathway")
 
 
+def test_summary_lists_censored_pooled_results_as_their_own_pathway(tmp_path):
+    for name in ("A_pooled_result.json", "A_pooled_censored_result.json"):
+        (tmp_path / name).write_text(json.dumps(pooled_result_to_dict(_pooled(False, "A"))))
+    rows = summarize_result_files(str(tmp_path))
+    assert sorted(r["pathway"] for r in rows) == ["pooled", "pooled_censored"]
+    assert all(r["selected"] == "m0;m1" for r in rows)
+
+
 def test_low_samples_per_dimension_produces_a_labelled_heuristic_flag():
     result = _pooled(False)
     result.selection.trajectory[0].low_samples_per_dimension = True
