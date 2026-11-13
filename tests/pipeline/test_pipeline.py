@@ -366,19 +366,16 @@ def test_meaningful_r2_is_validated():
 
 def test_pathways_use_the_largest_decorrelation_lag():
     from model_selection.pipeline.shared import max_decorrelation_lag
-    from model_selection.preprocessing.transforms import prepare_series
+    from model_selection.preprocessing.transforms import dependence_series
     basin = make_synthetic_basin(seed=8)
     sel = SelectionConfig(measure="linear", n_permutations=20)
     hf = run_high_flow_analysis(basin, sel, events=EventConfig(method="wasp", high_flow_quantile=0.90),
                                 rng=np.random.default_rng(3))
-    prepared = {k: prepare_series(s.values, index=s.index, seasonal_window_days=11)
-                for k, s in basin.formulations.items()}
+    prepared = {k: dependence_series(s.values, index=s.index, seasonal=True) for k, s in basin.formulations.items()}
     lag_hf, _ = max_decorrelation_lag(prepared, sel.dependence_run_length)
     assert hf.min_temporal_lag == lag_hf  # the preparation is deterministic
     pooled = run_pooled_analysis(basin, sel, rng=np.random.default_rng(4))
-    transformed = {k: prepare_series(s.values, index=s.index, seasonal_window_days=11)
-                   for k, s in basin.formulations.items()}
-    lag, _ = max_decorrelation_lag(transformed, sel.dependence_run_length)
+    lag, _ = max_decorrelation_lag(prepared, sel.dependence_run_length)
     assert pooled.min_temporal_lag == lag
 
 
@@ -389,8 +386,8 @@ def test_pooled_seasonal_conditioning_is_on_by_default_and_can_be_disabled():
     sel = SelectionConfig(measure="linear", n_permutations=20)
     on = run_pooled_analysis(basin, sel, rng=np.random.default_rng(1))
     off = run_pooled_analysis(basin, sel, rng=np.random.default_rng(1), seasonal=SeasonalConfig(enabled=False))
-    assert pooled_result_to_dict(on)["seasonal_conditioning"] == {"enabled": True, "window_days": 11, "record_too_short": False}
-    assert pooled_result_to_dict(off)["seasonal_conditioning"] == {"enabled": False, "window_days": None, "record_too_short": False}
+    assert pooled_result_to_dict(on)["seasonal_conditioning"] == {"enabled": True, "record_too_short": False}
+    assert pooled_result_to_dict(off)["seasonal_conditioning"] == {"enabled": False, "record_too_short": False}
     assert any("Conditioning on the time of year:" in n for n in on.notes)
     assert any("disabled" in n for n in off.notes)
 
@@ -404,11 +401,10 @@ def test_seasonal_conditioning_is_disabled_on_a_record_shorter_than_three_years(
     sel = SelectionConfig(measure="linear", n_permutations=20)
     pooled = run_pooled_analysis(basin, sel, rng=np.random.default_rng(1))
     high_flow = run_high_flow_analysis(basin, sel, rng=np.random.default_rng(1))
-    assert pooled_result_to_dict(pooled)["seasonal_conditioning"] == {"enabled": False, "window_days": None,
-                                                                      "record_too_short": True}
+    assert pooled_result_to_dict(pooled)["seasonal_conditioning"] == {"enabled": False, "record_too_short": True}
     assert high_flow_result_to_dict(high_flow)["seasonal_conditioning"]["enabled"] is False
     for result in (pooled, high_flow):
-        assert any("fewer than the 3 needed to estimate the seasonal cycle" in n for n in result.notes)
+        assert any("fewer than the 3 needed to describe the seasonal cycle" in n for n in result.notes)
         assert "seasonal_record_too_short" in [f["code"] for f in review_flags(result)]
 
 
@@ -435,7 +431,29 @@ def test_pooled_tests_condition_on_the_seasonal_phase():
     assert off.covariates is None
 
 
-def test_high_flow_dependence_lag_removes_the_calendar_day_mean_by_default_and_can_be_disabled():
+def test_pooled_series_keep_their_seasonal_cycles():
+    """The pooled tests analyse each series' standardized signed square root,
+    with its seasonal cycle, and condition on the seasonal phase."""
+    from model_selection.pipeline.pooled import pathway as pooled_pathway
+    from model_selection.preprocessing.transforms import prepare_series
+    basin = make_synthetic_basin(seed=12)
+    captured = []
+    real = pooled_pathway.run_selection_stage
+
+    def spy(sample, *args, **kwargs):
+        captured.append(sample)
+        return real(sample, *args, **kwargs)
+
+    with patch.object(pooled_pathway, "run_selection_stage", side_effect=spy):
+        run_pooled_analysis(basin, SelectionConfig(measure="linear", n_permutations=20), rng=np.random.default_rng(1))
+    sample = captured[0]
+    rows = sample.time_positions
+    assert np.allclose(sample.obs, prepare_series(basin.obs.values.astype(float))[rows])
+    for name, series in basin.formulations.items():
+        assert np.allclose(sample.candidates[name], prepare_series(series.values.astype(float))[rows])
+
+
+def test_high_flow_dependence_lag_is_adjusted_for_the_time_of_year_by_default_and_can_be_disabled():
     from model_selection.pipeline import SeasonalConfig
     from model_selection.pipeline.results import high_flow_result_to_dict
     basin = make_synthetic_basin(seed=10)
@@ -446,8 +464,8 @@ def test_high_flow_dependence_lag_removes_the_calendar_day_mean_by_default_and_c
                                  seasonal=SeasonalConfig(enabled=False))
     assert high_flow_result_to_dict(on)["seasonal_conditioning"]["enabled"] is True
     assert high_flow_result_to_dict(off)["seasonal_conditioning"]["enabled"] is False
-    assert any("calendar-day means removed" in n for n in on.notes)
-    assert any("with their seasonal cycles" in n for n in off.notes)
+    assert any("minus its fit on the seasonal phase" in n for n in on.notes)
+    assert any("with its seasonal cycle" in n for n in off.notes)
 
 
 def test_basis_sensitivity_check_repeats_the_stopping_round_with_the_main_features():

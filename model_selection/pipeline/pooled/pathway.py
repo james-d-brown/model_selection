@@ -4,13 +4,11 @@ timestep.
 
 0. Restrict every series to the common basis: the timesteps at which the
    observations and every formulation have values (pipeline.shared.common_basis).
-1. Transform every series (log, removal of its calendar-day mean by default,
-   rank-normal score, tied values sharing their average rank); every test
-   then conditions on the seasonal phase. Records too short to estimate the seasonal cycle
-   (preprocessing.seasonal.MIN_YEARS) are analysed with their seasonal
-   cycles.
+1. Transform every series (standardized signed square root of flow). Every test conditions on the seasonal phase, except on records too short to
+   describe the seasonal cycle (preprocessing.seasonal.MIN_YEARS).
 2. Estimate the dependence lag (largest Politis decorrelation lag of the
-   formulations).
+   formulations, each as analysed minus its fit on the seasonal phase;
+   preprocessing.transforms.dependence_series).
 3. Run the selection stage (one tier or the cascade). Records longer than
    the nonlinear tier's cap (SelectionConfig.nonlinear_max_n) give that tier
    an evenly spaced subsample of the cap's size, whose dependence its
@@ -20,8 +18,8 @@ timestep.
    record.
 
 With censoring (a preprocessing.censoring.Censoring), the candidates and the
-observations are instead the normal scores of log flow, without removal of
-the calendar-day mean, each censored at its own quantile; the selected
+observations are the transformed series of step 1, each censored at its own
+quantile; the selected
 formulations enter the conditioning set uncensored, as in step 1, with the
 seasonal phase. The dependence lag is that of step 2. Results are written
 to {gage}_pooled_censored_result.json.
@@ -50,7 +48,7 @@ from model_selection.pipeline.shared import (
 )
 from model_selection.preprocessing.censoring import CensoredSeries, Censoring
 from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal, seasonal_phase
-from model_selection.preprocessing.transforms import prepare_series
+from model_selection.preprocessing.transforms import dependence_series, prepare_series
 from model_selection.selection.tiers import SelectionSample
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
 from model_selection.selection.stage import run_selection_stage
@@ -72,8 +70,8 @@ def _spaced_subsample(sample: SelectionSample, max_n: int, rng: np.random.Genera
 
 def _censored_series(basin: BasinData, rows: np.ndarray, censoring: Censoring):
     """(censored candidates, censored observations, CensoredSeries): each
-    series' normal scores of log flow at the complete rows, without removal
-    of the calendar-day mean, censored at its own quantile over those rows."""
+    series as transformed for the pooled pathway at the complete rows,
+    censored at its own quantile over those rows."""
     uncensored = {name: prepare_series(series.values.astype(float))[rows]
                   for name, series in basin.formulations.items()}
     obs_uncensored = prepare_series(basin.obs.values.astype(float))[rows]
@@ -100,11 +98,11 @@ def run_pooled_analysis(
         e.g. Censoring.at_high_flow(events) for the high-flow events'
         quantile; None (default) for the uncensored pathway.
 
-    seasonal : conditioning on the time of year (default: enabled, 11-day
-        window for the calendar-day mean); SeasonalConfig(enabled=False)
-        analyses the series with their seasonal cycles, as happens
-        automatically on records too short to estimate the seasonal cycle
-        (docs/methods.md, Seasonality).
+    seasonal : conditioning on the time of year (default: enabled: every
+        test conditions on the seasonal phase, and the dependence lag is
+        estimated from the series adjusted for it); SeasonalConfig(enabled=False)
+        turns it off, as happens automatically on records too short to
+        describe the seasonal cycle (docs/methods.md, Seasonality).
     Writes {gage}_pooled_result.json ({gage}_pooled_censored_result.json
     with censoring) when output.output_dir is set.
     """
@@ -124,32 +122,35 @@ def run_pooled_analysis(
     zero_flow, zero_flow_flag = zero_flow_check(basin, notes)
 
     seasonal, too_short = resolve_seasonal(seasonal, basin.obs.index[rows])
-    window = seasonal.window_days if seasonal.enabled else None
-    obs_t = prepare_series(basin.obs.values.astype(float), index=basin.obs.index, seasonal_window_days=window)
-    candidates_t = {name: prepare_series(series.values.astype(float), index=series.index,
-                                         seasonal_window_days=window)
-                    for name, series in basin.formulations.items()}
+    obs_t = prepare_series(basin.obs.values.astype(float))
+    candidates_t = {name: prepare_series(series.values.astype(float)) for name, series in basin.formulations.items()}
     if seasonal.enabled:
-        notes.append(f"Conditioning on the time of year: each series' calendar-day mean ({seasonal.window_days}-day "
-                     "triangular window) removed before the rank-normal transform, and every test conditions on "
-                     "the seasonal phase (sin and cos of the day of year).")
+        notes.append("Conditioning on the time of year: every test conditions on the seasonal phase (sin and cos "
+                     "of the day of year).")
     elif too_short:
         notes.append(too_short)
     else:
-        notes.append("Conditioning on the time of year disabled: series analysed with their seasonal cycles.")
+        notes.append("Conditioning on the time of year disabled: the tests do not condition on the seasonal phase.")
 
+    lag_series = {name: dependence_series(s.values.astype(float), index=s.index, seasonal=seasonal.enabled)
+                  for name, s in basin.formulations.items()}
     min_temporal_lag = selection.min_temporal_lag
     if min_temporal_lag is None:
-        min_temporal_lag, per_formulation = max_decorrelation_lag(candidates_t, selection.dependence_run_length)
+        min_temporal_lag, per_formulation = max_decorrelation_lag(lag_series, selection.dependence_run_length)
         notes.append(
             f"min_temporal_lag (dependence lag) auto-estimated as {min_temporal_lag} timesteps: the largest "
-            "Politis decorrelation lag across the simulated formulations, transformed as above (obs-free; "
-            + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
+            "Politis decorrelation lag across the simulated formulations, each as analysed (standardized signed "
+            "square root of flow)"
+            + (" minus its fit on the seasonal phase" if seasonal.enabled else "")
+            + " (obs-free; " + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
             + "); pass min_temporal_lag explicitly to override."
         )
     else:
         notes.append(f"min_temporal_lag={min_temporal_lag} (caller-specified).")
-    write_dependence_plot(output, gage, candidates_t, obs_t, basin.obs.index, selection.dependence_run_length, window,
+    write_dependence_plot(output, gage, lag_series,
+                          dependence_series(basin.obs.values.astype(float), index=basin.obs.index,
+                                            seasonal=seasonal.enabled),
+                          basin.obs.index, selection.dependence_run_length, seasonal.enabled,
                           raw={name: s.values.astype(float) for name, s in basin.formulations.items()},
                           raw_observations=basin.obs.values.astype(float))
 
@@ -172,8 +173,9 @@ def run_pooled_analysis(
         censoring_record = {"quantile": censoring.quantile, "thresholds": dict(censored.thresholds),
                             "obs_threshold": censored.obs_threshold, "share_at_threshold": shares}
         notes.append(
-            f"Censoring at high flow: the candidates and the observations are the normal scores of log flow, "
-            f"without removal of the calendar-day mean, each censored at its own {censoring.quantile:g} quantile "
+            f"Censoring at high flow: the candidates and the observations are the standardized signed square "
+            f"root of flow, "
+            f"each censored at its own {censoring.quantile:g} quantile "
             "(every value below it set to it); the selected formulations enter the conditioning set uncensored, "
             "as prepared above" + (", with the seasonal phase" if phase is not None else "") + ". Share of each "
             "series at its threshold: " + ", ".join(f"{k} {v:.3f}" for k, v in shares.items()) + ".")
@@ -228,9 +230,7 @@ def run_pooled_analysis(
         attempted_tiers=outcome.attempted_tiers,
         pearson_correlation=pearson,
         pearson_correlation_transformed=pearson_transformed,
-        seasonal_conditioning={"enabled": seasonal.enabled,
-                                  "window_days": seasonal.window_days if seasonal.enabled else None,
-                                  "record_too_short": too_short is not None},
+        seasonal_conditioning={"enabled": seasonal.enabled, "record_too_short": too_short is not None},
         censoring=censoring_record,
     )
     if output.output_dir is not None:

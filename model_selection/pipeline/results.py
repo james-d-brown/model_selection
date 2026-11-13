@@ -43,14 +43,14 @@ class PooledResult:
     cmi_calibration: bool = True
     censoring: dict | None = None
     """With censoring at high flow: the quantile, each series' threshold
-    (on its normal scores) and the share of each series at it; None for the
+    (on its transformed scale) and the share of each series at it; None for the
     uncensored pathway."""
     pearson_correlation: dict = field(default_factory=dict)
     """Each formulation's Pearson correlation with the observed flow at every
     complete time step; reported only, for comparison."""
     pearson_correlation_transformed: dict = field(default_factory=dict)
-    """The same correlation on the series as transformed for selection (log
-    flow less its calendar-day mean, as normal scores)."""
+    """The same correlation on the series as transformed for selection
+    (standardized signed square root of flow)."""
 
 
 @dataclass
@@ -201,7 +201,7 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
     low_samples_per_dimension : a step had fewer samples per dimension than
         the heuristic threshold (SelectionConfig.min_samples_per_dimension).
     zero_flow : a series has many zero values.
-    seasonal_record_too_short : the record is too short to estimate the
+    seasonal_record_too_short : the record is too short to describe the
         seasonal cycle (the median calendar day has data in fewer than
         preprocessing.seasonal.MIN_YEARS years), so the pathway ran without
         conditioning on the time of year (docs/methods.md, Seasonality).
@@ -397,8 +397,8 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         flags.append({"code": "zero_flow", "message": "at least one series has a high fraction of zero flow."})
     if (getattr(result, "seasonal_conditioning", None) or {}).get("record_too_short"):
         flags.append({"code": "seasonal_record_too_short", "message": (
-            "the record is too short to estimate the seasonal cycle (the median calendar day has data in fewer "
-            "than three years), so the series were analysed with their seasonal cycles: a formulation can be "
+            "the record is too short to describe the seasonal cycle (the median calendar day has data in fewer "
+            "than three years), so the tests did not condition on the seasonal phase: a formulation can be "
             "credited with reproducing the seasonal cycle.")})
     if isinstance(result, PooledResult) and result.meaningful_r2 is not None and sel is not None \
             and sel.trajectory and sel.trajectory[0].detectable_r2 is not None \

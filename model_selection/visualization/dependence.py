@@ -3,16 +3,16 @@ Correlograms of the series that set the dependence lag, and of the same
 series before any transformation.
 
 The dependence lag (docs/methods.md, Dependence between samples) is the largest
-Politis decorrelation lag across the formulations' series as prepared for
-the pooled pathway. The upper panel draws each prepared series' sample
+Politis decorrelation lag across the formulations' series prepared for it
+(preprocessing.transforms.dependence_series). The upper panel draws each such series' sample
 autocorrelation against lag in days, on a logarithmic axis so that hours to
 years appear together, with the significance band that defines the
 decorrelation lag at the record's length, each series' decorrelation lag,
 and whole years. It shows how fast correlation decays, whether a slow or
 long-memory component remains, and whether periodic structure remains after
-the calendar-day mean is removed. The lower panel draws the same for the
-flows as supplied (no log, no removal of the calendar-day mean, no normal
-scores), so the effect of the transformations on the decorrelation can be
+the adjustment for the time of year. The lower panel draws the same for the
+flows as supplied (no transform, no seasonal adjustment), so the
+effect of the transformations on the decorrelation can be
 seen; it plays no part in the analysis. The observations are drawn for
 comparison only; they play no part in the dependence lag.
 """
@@ -76,16 +76,16 @@ def _lag_text(series: dict[str, np.ndarray], step_hours: float, run_length: int)
 
 def plot_dependence(prepared: dict[str, np.ndarray], step_hours: float, gage: str,
                     observations: np.ndarray | None = None, run_length: int = DEFAULT_RUN_LENGTH,
-                    seasonal_window_days: int | None = None, raw: dict[str, np.ndarray] | None = None,
+                    seasonal: bool = False, raw: dict[str, np.ndarray] | None = None,
                     raw_observations: np.ndarray | None = None) -> go.Figure:
-    """Correlograms of the prepared formulation series (and, dotted, the
-    prepared observations), with the band and lags described in the module
-    docstring; with `raw`, a second panel of the same for the flows as
-    supplied. seasonal_window_days is the calendar-day mean's window used in
-    the preparation (None: not removed), stated on the figure."""
-    prepared_as = ("log flow with its calendar-day mean removed "
-                   f"({seasonal_window_days}-day window), rank-normal transformed"
-                   if seasonal_window_days is not None else "log flow (seasonal cycle not removed), rank-normal transformed")
+    """Correlograms of the formulation series from which the dependence lag
+    is estimated (and, dotted, the observations prepared the same way), with
+    the band and lags described in the module docstring; with `raw`, a second
+    panel of the same for the flows as supplied. seasonal: whether the series
+    were adjusted for the time of year (preprocessing.transforms.
+    dependence_series), stated on the figure."""
+    prepared_as = ("standardized signed square root of flow minus its fit on the seasonal phase"
+                   if seasonal else "standardized signed square root of flow (seasonal cycle not adjusted)")
     if raw is None:
         fig = go.Figure()
         band = _correlograms(fig, None, prepared, observations, step_hours, run_length, True)
@@ -95,7 +95,7 @@ def plot_dependence(prepared: dict[str, np.ndarray], step_hours: float, gage: st
     else:
         wrap = lambda text: "<br>".join(textwrap.wrap(text, 150))   # long lists of lags would run off the page
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.11, subplot_titles=(
-            wrap(f"As analysed ({prepared_as}). Decorrelation lags: " + _lag_text(prepared, step_hours, run_length)),
+            wrap(f"As used for the dependence lag ({prepared_as}). Decorrelation lags: " + _lag_text(prepared, step_hours, run_length)),
             wrap("Flow as supplied, before any transformation. Decorrelation lags: "
                  + _lag_text(raw, step_hours, run_length))))
         band = _correlograms(fig, 1, prepared, observations, step_hours, run_length, True)
@@ -108,13 +108,16 @@ def plot_dependence(prepared: dict[str, np.ndarray], step_hours: float, gage: st
         height = 1100
     fig.update_layout(
         title=dict(text=f"Basin {gage}: autocorrelation of the series"
-                   + (" as analysed" if raw is None else ", as analysed and before transformation"), x=0.01,
+                   + (" as used for the dependence lag" if raw is None
+                      else ", as used for the dependence lag and before transformation"), x=0.01,
                    **({} if raw is None else {"y": 0.99, "yanchor": "top"})),
         template="plotly_white", height=height, width=1200, margin=dict(t=190 if raw is not None else 130, b=140),
         legend=dict(orientation="h", yanchor="top", y=-0.06 if raw is not None else -0.18, xanchor="left", x=0))
-    caption = ((f"Each curve is the autocorrelation of a series as analysed: {prepared_as}, at every timestep. "
+    caption = ((f"Each curve is the autocorrelation of a series as used for the dependence lag: {prepared_as}, "
+                "at every timestep. "
                 if raw is None else
-                "Upper panel: each series as analysed, at every timestep; this is the panel that sets the dependence "
+                "Upper panel: each series as used for the dependence lag, at every timestep; this is the panel that "
+                "sets the dependence "
                 "lag. Lower panel: the same flows as supplied, for comparison only; it plays no part in the analysis. ")
                + "Black dotted band: significance of an autocorrelation at the record's length"
                + (f" (±{band:.3g})" if band is not None else "")

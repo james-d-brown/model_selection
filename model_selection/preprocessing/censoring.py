@@ -3,10 +3,10 @@ Censoring of series at high flow (docs/methods.md, Censoring at high flow).
 
 A series is censored at a high quantile of its own record: every value below
 the quantile is set to the quantile value itself. Censoring is applied to
-the normal scores of log flow (preprocessing.transforms.prepare_series
-without removal of the calendar-day mean), which order the values as flow
-does, so the censored values lie at the quantile's normal score, adjacent
-to the values above it, as in the threshold-weighted CRPS (Gneiting and
+the series as the pooled pathway transforms it
+(preprocessing.transforms.prepare_series), which orders the values as flow
+does, so the censored values lie at the quantile, adjacent to the values
+above it, as in the threshold-weighted CRPS (Gneiting and
 Ranjan, 2011; Allen et al., 2023). A function of the candidate and a
 function of the observations are conditionally independent whenever the
 candidate and the observations are (Dawid, 1979), so censoring them keeps

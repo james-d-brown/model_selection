@@ -64,7 +64,7 @@ from model_selection.pipeline.shared import (
     pearson_with_observations, resolve_rng, write_dependence_plot, zero_flow_check,
 )
 from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal
-from model_selection.preprocessing.transforms import prepare_series
+from model_selection.preprocessing.transforms import dependence_series
 from model_selection.selection.tiers import SelectionSample, partial_out_covariates
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
 from model_selection.selection.stage import run_selection_stage
@@ -206,8 +206,8 @@ def run_high_flow_analysis(
     """Run the high-flow event pathway for one basin (see module docstring).
 
     seasonal : the series preparation used to estimate the dependence lag
-        (default: calendar-day mean removed, as in the pooled pathway); the
-        events and their features are not adjusted for season
+        (default: adjusted for the time of year, as in the pooled pathway);
+        the events and their features are not adjusted for season
         (docs/methods.md, Seasonality).
 
     Writes {gage}_high_flow_result.json and the requested plots when
@@ -238,28 +238,27 @@ def run_high_flow_analysis(
 
     min_temporal_lag = selection.min_temporal_lag
     if min_temporal_lag is None:
-        window = seasonal.window_days if seasonal.enabled else None
-        prepared = {name: prepare_series(s.values.astype(float), index=s.index, seasonal_window_days=window)
+        prepared = {name: dependence_series(s.values.astype(float), index=s.index, seasonal=seasonal.enabled)
                     for name, s in basin.formulations.items()}
         min_temporal_lag, per_formulation = max_decorrelation_lag(prepared, selection.dependence_run_length)
-        prep = (f"with their calendar-day means removed ({seasonal.window_days}-day window)"
-                if seasonal.enabled else "with their seasonal cycles")
+        prep = ("each as analysed (standardized signed square root of flow) minus its fit on the seasonal phase"
+                if seasonal.enabled else "each as analysed (standardized signed square root of flow), with its "
+                "seasonal cycle")
         notes.append(
             f"min_temporal_lag (dependence lag) auto-estimated as {min_temporal_lag} timesteps: the largest "
-            f"Politis decorrelation lag across the simulated formulations, prepared as in the pooled pathway and {prep} "
+            f"Politis decorrelation lag across the simulated formulations, as in the pooled pathway: {prep} "
             "(obs-free; " + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
             + "); pass min_temporal_lag explicitly to override."
         )
     else:
         notes.append(f"min_temporal_lag={min_temporal_lag} (caller-specified).")
     if output.dependence_plot and output.output_dir is not None:
-        window = seasonal.window_days if seasonal.enabled else None
-        plotted = {name: prepare_series(s.values.astype(float), index=s.index, seasonal_window_days=window)
+        plotted = {name: dependence_series(s.values.astype(float), index=s.index, seasonal=seasonal.enabled)
                    for name, s in basin.formulations.items()}
-        plotted_obs = prepare_series(basin.obs.values.astype(float), index=basin.obs.index,
-                                     seasonal_window_days=window)
+        plotted_obs = dependence_series(basin.obs.values.astype(float), index=basin.obs.index,
+                                        seasonal=seasonal.enabled)
         write_dependence_plot(output, gage, plotted, plotted_obs, basin.obs.index, selection.dependence_run_length,
-                              window, raw={name: s.values.astype(float) for name, s in basin.formulations.items()},
+                              seasonal.enabled, raw={name: s.values.astype(float) for name, s in basin.formulations.items()},
                               raw_observations=basin.obs.values.astype(float))
     notes.append(f"Per-series event detection: method={events.method!r}"
                  + (f", {events.pot}" if events.method == "pot" else f", {events.wasp}") + ".")
@@ -528,7 +527,6 @@ def run_high_flow_analysis(
         event_dependence=dependence_record,
         missing_values=missing_values,
         seasonal_conditioning={"enabled": seasonal.enabled,
-                                  "window_days": seasonal.window_days if seasonal.enabled else None,
                                   "applies_to": "dependence lag estimate",
                                   "record_too_short": too_short is not None},
         pot_ratio=events.pot.pot_ratio, recession_ratio=events.pot.recession_ratio, notes=notes,

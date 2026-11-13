@@ -46,8 +46,8 @@ def test_censored_sample_censors_candidates_and_observations_and_conditions_on_u
     rows = np.flatnonzero(np.isfinite(common.obs.values.astype(float)))
     assert np.array_equal(s.time_positions, plain.time_positions)
     assert np.array_equal(s.time_positions, rows)
-    # Candidates and observations: normal scores of log flow, no calendar-day mean removed, censored at
-    # each series' own quantile over the complete rows.
+    # Candidates and observations: the transformed series, censored at each series' own quantile over the
+    # complete rows.
     for name, series in common.formulations.items():
         scores = prepare_series(series.values.astype(float))[rows]
         t = np.quantile(scores, 0.9)
@@ -130,7 +130,9 @@ def test_censored_cascade_runs_its_subsamples_and_the_cmi_calibration_on_censore
     # The informative formulation is accepted, so the calibration runs on its 52 censored surrogates.
     assert any(st.accepted and st.cmi_calibration for st in result.selection.trajectory)
     assert seen["censor_given"] and len(seen["surrogate_shares"]) == 52
-    assert min(seen["surrogate_shares"]) > 0.8
+    # A surrogate is the candidate's fit plus permuted residuals, censored at the candidate's threshold, so its
+    # share at the threshold is near, not exactly, the quantile's 0.9; every one keeps a large point mass.
+    assert min(seen["surrogate_shares"]) > 0.75
 
 
 def test_run_basin_runs_the_censored_pooled_pathway_when_given_censoring():

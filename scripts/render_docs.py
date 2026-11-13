@@ -202,7 +202,7 @@ def render(src: Path, dst: Path, title: str, toc: bool) -> None:
 def main(root: Path) -> list[Path]:
     """Render both documents under `root`; returns the HTML paths written."""
     targets = [(root / "README.md", root / "README.html", "model_selection", False),
-               (root / "docs" / "methods.md", root / "docs" / "methods.html", "model_selection methods", True)]
+               (root / "docs" / "methods.md", root / "docs" / "methods.html", "A framework for hydrologic model selection through conditional independence testing", True)]
     for src, dst, title, toc in targets:
         render(src, dst, title, toc)
     return [dst for _, dst, _, _ in targets]

@@ -83,8 +83,8 @@ def zero_flow_check(basin: BasinData, notes: list[str]) -> tuple[dict[str, float
     if flag:
         notes.append(
             "high zero-flow fraction detected in at least one series "
-            f"(threshold={ZERO_FLOW_FLAG_THRESHOLD}); tied zero flows are ordered at random by the rank "
-            "transform, which imposes an arbitrary order among them (docs/methods.md, Samples)."
+            f"(threshold={ZERO_FLOW_FLAG_THRESHOLD}); zero flows are a point mass in the analysed series "
+            "(docs/methods.md, Samples)."
         )
     return fractions, flag
 
@@ -119,7 +119,7 @@ def log_review_flags(result, pathway: str) -> None:
 
 
 def write_dependence_plot(output: OutputConfig, gage: str, prepared: dict, observations, index,
-                          run_length: int, seasonal_window_days: int | None, raw: dict | None = None,
+                          run_length: int, seasonal: bool, raw: dict | None = None,
                           raw_observations=None) -> str | None:
     """Write {gage}_dependence.html (visualization.dependence) when an output
     directory is set, the plot is enabled and the series are time-indexed;
@@ -138,7 +138,7 @@ def write_dependence_plot(output: OutputConfig, gage: str, prepared: dict, obser
     step_hours = (index[1] - index[0]) / np.timedelta64(1, "h")
     path = os.path.join(output.output_dir, f"{gage}_dependence.html")
     write_standalone_html(plot_dependence(prepared, step_hours, gage, observations, run_length,
-                                          seasonal_window_days, raw, raw_observations), path,
+                                          seasonal, raw, raw_observations), path,
                           f"{gage} dependence")
     return path
 
@@ -188,7 +188,7 @@ def log_pearson(gage: str, pathway: str, what: str, r: dict[str, float],
     text = (f"[i] {gage} {pathway}: each formulation on its own, as a traditional evaluation would rank them. "
             f"Pearson correlation with the observations on the raw flow ({what}): {ranked(r)}.")
     if r_transformed:
-        text += (" Pearson correlation on the series as transformed for selection (log flow less its calendar-day "
-                 f"mean, as normal scores, at the same time steps): {ranked(r_transformed)}.")
+        text += (" Pearson correlation on the series as transformed for selection (signed square root of flow, "
+                 f"at the same time steps): {ranked(r_transformed)}.")
     text += " Selection instead asks what each formulation adds beyond those already selected."
     logger.info(text)

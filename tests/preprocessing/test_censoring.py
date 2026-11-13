@@ -34,10 +34,9 @@ def test_values_below_the_quantile_are_set_to_the_quantile_value_itself():
         c.threshold(np.array([np.nan, np.nan]))
 
 
-def test_censoring_normal_scores_leaves_the_point_mass_adjacent_to_the_exceedances():
-    """Censoring is applied after the normal-score transform of log flow, so
-    the censored values lie at the quantile's normal score, next to the
-    smallest exceedance, not at the mid-rank score of a censored group."""
+def test_censoring_the_transformed_series_leaves_the_point_mass_adjacent_to_the_exceedances():
+    """Censoring is applied after the transform, so the censored values lie
+    at the quantile, next to the smallest exceedance."""
     rng = np.random.default_rng(0)
     flow = rng.gamma(2.0, size=5000)
     scores = prepare_series(flow)
@@ -46,7 +45,7 @@ def test_censoring_normal_scores_leaves_the_point_mass_adjacent_to_the_exceedanc
     out = c.apply(scores, t)
     assert np.mean(out == t) == pytest.approx(0.9, abs=0.001)
     above = out[out > t]
-    assert t == pytest.approx(1.2816, abs=0.01)                          # the 0.9 normal quantile
+    assert t == pytest.approx(np.quantile(scores, 0.9))
     assert above.min() - t < 0.01                                        # no gap at the threshold
     # The order of the flows above the threshold is kept.
     hi = flow > np.quantile(flow, 0.9)

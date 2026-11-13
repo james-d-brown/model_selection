@@ -1,67 +1,69 @@
-"""Series preparation: log, optional seasonal anomalies, rank-normal score
-with ties sharing their average rank (docs/methods.md, Samples)."""
+"""Series preparation: the standardized signed square root of flow, and the
+series for the dependence lag, adjusted for the time of year
+(docs/methods.md, Samples)."""
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.stats import norm
 
-from model_selection.preprocessing.transforms import log_transform, prepare_series, rank_normal_transform
-
-
-def test_rank_normal_scores_are_the_normal_quantiles_of_the_ranks():
-    x = np.array([3.0, 1.0, 2.0, 10.0])
-    expected = norm.ppf((np.array([3, 1, 2, 4]) - 0.5) / 4)
-    assert np.allclose(rank_normal_transform(x), expected)
+from model_selection.preprocessing.transforms import (
+    EXPONENT, dependence_series, prepare_series, signed_power, standardize_series,
+)
 
 
-def test_tied_values_share_one_normal_score():
-    """Zero flows share their average rank, so a point mass stays one value;
-    untied values keep their order and are unchanged by the ties' presence
-    beyond their ranks."""
-    rng = np.random.default_rng(1)
-    x = np.concatenate([np.zeros(1000), rng.gamma(2.0, size=9000)])
-    a = rank_normal_transform(x)
-    assert np.unique(a[:1000]).size == 1 and a[0] == pytest.approx(norm.ppf((500.5 - 0.5) / x.size))
-    assert np.unique(a).size == 9001
-    assert np.max(a[:1000]) < np.min(a[1000:])              # zeros stay below every positive flow
-    assert np.array_equal(np.argsort(a[1000:]), np.argsort(x[1000:]))  # untied order unchanged
-    assert np.array_equal(a, rank_normal_transform(x))      # deterministic
+def test_the_exponent_is_the_square_root():
+    assert EXPONENT == 0.5
+    assert np.allclose(signed_power(np.array([4.0, 0.0, -9.0])), [2.0, 0.0, -3.0])
 
 
-def test_missing_values_stay_missing_and_do_not_count_in_the_ranks():
-    x = np.array([1.0, np.nan, 3.0, 2.0])
-    out = rank_normal_transform(x)
-    assert np.isnan(out[1])
-    assert np.allclose(out[[0, 3, 2]], norm.ppf((np.arange(1, 4) - 0.5) / 3))
-
-
-def test_log_matters_only_through_seasonal_conditioning():
-    # Without seasonal standardization the output depends only on the order of
-    # values, which the log does not change.
+def test_prepared_series_is_the_standardized_signed_square_root():
     rng = np.random.default_rng(4)
     x = rng.gamma(2.0, size=5000)
-    assert np.allclose(prepare_series(x), rank_normal_transform(x))
+    out = prepare_series(x)
+    expected = np.sqrt(x)
+    assert np.allclose(out, (expected - expected.mean()) / expected.std())
+    assert abs(out.mean()) < 1e-12 and out.std() == pytest.approx(1.0)
 
 
-def test_seasonal_conditioning_needs_timestamps():
-    with pytest.raises(ValueError):
-        prepare_series(np.ones(10) + np.arange(10), seasonal_window_days=11)
+def test_negative_flow_keeps_its_sign_and_order():
+    x = np.array([-4.0, -1.0, 0.0, 1.0, 9.0])
+    out = prepare_series(x)
+    assert np.all(np.diff(out) > 0)
+    root = np.array([-2.0, -1.0, 0.0, 1.0, 3.0])
+    assert np.allclose(out, (root - root.mean()) / root.std())
 
 
-def test_prepared_series_is_near_standard_normal_and_keeps_zero_flow_ties():
-    """After the calendar-day mean is removed, a zero flow's value depends on
-    its calendar day, so zero flows tie with zero flows of the same calendar
-    day in other years and keep one shared score; the marginal stays near
-    standard normal."""
+def test_zero_flows_are_a_point_mass_with_no_offset():
     rng = np.random.default_rng(6)
-    idx = pd.date_range("2001-01-01", periods=3 * 8760, freq="h")
-    x = np.where(rng.random(idx.size) < 0.1, 0.0, rng.gamma(2.0, size=idx.size))
-    out = prepare_series(x, index=idx, seasonal_window_days=11)
+    x = np.where(rng.random(20000) < 0.1, 0.0, rng.gamma(2.0, size=20000))
+    out = prepare_series(x)
     zero = x == 0
-    assert np.unique(out[zero]).size < zero.sum()
-    assert np.unique(out[~zero]).size == (~zero).sum()
-    assert abs(out.mean()) < 0.01 and out.std() == pytest.approx(1.0, abs=0.02)
+    assert np.unique(out[zero]).size == 1
+    assert np.max(out[zero]) < np.min(out[~zero])
 
 
-def test_log_offset_is_one_percent_of_the_smallest_positive_value():
-    assert np.allclose(log_transform(np.array([0.0, 2.0, 4.0])), np.log(np.array([0.0, 2.0, 4.0]) + 0.02))
+def test_prepared_series_do_not_depend_on_the_flow_units():
+    rng = np.random.default_rng(8)
+    x = rng.gamma(2.0, size=1000) - 0.2                 # some negative flow too
+    assert np.allclose(prepare_series(x), prepare_series(35.3147 * x))   # m3/s to ft3/s
+
+
+def test_missing_values_stay_missing_and_do_not_count_in_the_standardization():
+    x = np.array([1.0, np.nan, 4.0, 9.0])
+    out = prepare_series(x)
+    assert np.isnan(out[1])
+    assert np.allclose(out[[0, 2, 3]], prepare_series(np.array([1.0, 4.0, 9.0])))
+    assert np.allclose(standardize_series(np.array([2.0, 2.0])), [0.0, 0.0])     # constant: centred only
+
+
+def test_dependence_series_is_the_analysed_series_less_its_fit_on_the_phase():
+    from model_selection.preprocessing.seasonal import phase_residuals
+    rng = np.random.default_rng(7)
+    idx = pd.date_range("2001-01-01", periods=5 * 365, freq="D")
+    x = np.exp(np.sin(2 * np.pi * idx.dayofyear.values / 365.25) + rng.standard_normal(idx.size))
+    assert np.allclose(dependence_series(x, idx, seasonal=True), phase_residuals(prepare_series(x), idx))
+    assert np.allclose(dependence_series(x, idx, seasonal=False), prepare_series(x))
+
+
+def test_the_seasonal_adjustment_needs_timestamps():
+    with pytest.raises(ValueError):
+        dependence_series(np.ones(10) + np.arange(10), seasonal=True)
