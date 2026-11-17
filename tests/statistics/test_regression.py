@@ -269,3 +269,27 @@ def test_rank_change_is_measured_only_when_the_chosen_factor_is_capped():
         assert capped.cap_share > 0 and capped.rank_change > 0
     finally:
         kr.set_low_rank(kr.DEFAULT_RANK_CAP)
+
+
+def test_the_split_feature_factor_has_the_same_kernel_and_leading_columns_first():
+    from model_selection.statistics.regression.kernel_residuals import (
+        feature_factor_split, feature_factor_with_cap, feature_kernel)
+    x = np.random.default_rng(12).gamma(2.0, size=300)
+    L, _, groups = feature_factor_split(x)
+    assert np.allclose(L @ L.T, feature_kernel(x), atol=1e-8)
+    assert np.allclose(L[:, 0], (x - x.mean()) / x.std())          # the variable's own column first
+    var = (L[:, 1:] - L[:, 1:].mean(axis=0)).var(axis=0)
+    assert np.all(np.diff(var) <= 1e-9)                              # principal axes, largest first
+    assert groups[0] == [0] and sorted(j for g in groups for j in g) == list(range(L.shape[1]))
+
+
+def test_residuals_by_group_with_one_group_match_the_shared_tuning():
+    from model_selection.statistics.regression.kernel_residuals import ConditioningRegression
+    rng = np.random.default_rng(13)
+    z = rng.uniform(-2, 2, size=(250, 1))
+    Y = np.column_stack([np.sin(2 * z[:, 0]) + 0.3 * rng.standard_normal(250), z[:, 0] ** 2 + rng.standard_normal(250)])
+    reg = ConditioningRegression(z, np.arange(250), buffer=0)
+    shared, _ = reg.residuals(Y)
+    assert np.allclose(reg.residuals_by_group(Y, [[0, 1]]), shared)
+    each = reg.residuals_by_group(Y, [[0], [1]])
+    assert np.allclose(each[:, [0]], reg.residuals(Y[:, [0]])[0]) and np.allclose(each[:, [1]], reg.residuals(Y[:, [1]])[0])

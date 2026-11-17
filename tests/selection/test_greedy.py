@@ -393,10 +393,10 @@ def test_the_winner_is_the_significant_candidate_with_the_largest_effect_size():
     assert res.trajectory[0].formulation == "b" and res.trajectory[0].accepted
 
 
-def test_removed_covariates_count_as_conditioning_variables_in_the_power_calculation():
+def test_removed_covariates_count_as_conditioning_variables():
     """A sample whose covariates were removed by kernel regression counts that
-    fit's effective degrees of freedom, so its detectable contribution is
-    larger than the same sample's without them."""
+    fit's effective degrees of freedom as conditioning variables, so it has
+    fewer samples per dimension than the same sample without them."""
     from dataclasses import replace
     sample = _sample()
     plain = greedy_forward_selection(sample, _tier({"a": 0.5, "b": 0.0, "c": 0.0}), 99, max_selected=1,
@@ -405,4 +405,18 @@ def test_removed_covariates_count_as_conditioning_variables_in_the_power_calcula
                                                partialled_df=8.0),
                                        _tier({"a": 0.5, "b": 0.0, "c": 0.0}), 99, max_selected=1,
                                        rng=np.random.default_rng(1))
-    assert removed.trajectory[0].detectable_r2 > plain.trajectory[0].detectable_r2
+    assert removed.trajectory[0].samples_per_dimension < plain.trajectory[0].samples_per_dimension
+
+
+@pytest.mark.parametrize("accepted, p, below_floor, expected", [
+    (True, 0.01, False, "selected"),
+    (False, 0.01, True, "detected_below_floor"),
+    (False, 0.40, True, "not_detected"),
+    (False, 0.40, False, "not_detected"),
+    (False, 0.01, False, "not_tested"),
+])
+def test_step_outcome_rests_on_the_test_decision_alone(accepted, p, below_floor, expected):
+    from model_selection.selection.greedy import STEP_OUTCOMES, SelectionStep, step_outcome
+    step = SelectionStep(formulation="a", association=0.1, p_value=p, accepted=accepted, n_selected_before=0,
+                         n_candidates_tested=2, dependence_lag=0, magnitude_unsubstantiated=below_floor)
+    assert step_outcome(step, alpha=0.05) == expected and expected in STEP_OUTCOMES

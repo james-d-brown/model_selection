@@ -1,5 +1,6 @@
 """The event-merging diagnostic agrees with the high-flow event pathway's own event
 construction and its stage counts are consistent."""
+import pytest
 import numpy as np
 
 from model_selection.event_detection import EventConfig
@@ -9,6 +10,7 @@ from scripts.diagnostics.event_merging import event_merging_report
 from tests.fixtures.basins import make_synthetic_basin
 
 
+@pytest.mark.integration
 def test_stage_counts_are_consistent_and_match_the_pathway(tmp_path):
     basin = make_synthetic_basin(n_hours=6000, n_events=40, seed=3)
     events = EventConfig(method="wasp", high_flow_quantile=0.9)

@@ -93,6 +93,7 @@ def test_hydrograph_draws_the_median_high_flow_threshold():
     assert line.y[0] == pytest.approx(float(expected))
 
 
+@pytest.mark.integration
 def test_dependence_plot_is_written_by_the_pooled_pathway(tmp_path):
     from model_selection.pipeline import OutputConfig, run_pooled_analysis
     from model_selection.selection import SelectionConfig

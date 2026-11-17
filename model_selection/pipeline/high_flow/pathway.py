@@ -68,7 +68,7 @@ from model_selection.preprocessing.transforms import dependence_series
 from model_selection.selection.tiers import SelectionSample, partial_out_covariates
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
 from model_selection.selection.stage import run_selection_stage
-from model_selection.statistics.power import describe_detectable, minimum_detectable_r2, rao_degrees
+from model_selection.statistics.power import rao_degrees
 from model_selection.event_detection.dependence import arrival_clusters, recession_clusters, subset_labels
 from model_selection.statistics.significance.clusters import cluster_coordinates, cluster_summary
 
@@ -284,7 +284,6 @@ def run_high_flow_analysis(
     sensitivity = None
     dependence_record = None
     all_events = []
-    detectable_r2 = None
     power_stop_reason = None
     n_components = 0
     event_gallery_path = overview_diagnostic_path = None
@@ -403,20 +402,15 @@ def run_high_flow_analysis(
             # Every test conditions on the parameters of the events' shared registration.
             registration = registration_covariates(expanded_events, retained_event_ids)
 
-            # Can the event sample support the tests at all?
-            # See docs/methods.md, Detectable effect and the meaningful-effect threshold.
+            # Is the test defined on these events? It is not when no denominator degrees of freedom remain
+            # (docs/methods.md, Step outcomes and the meaningful-effect threshold).
             n_dims = obs_features.shape[1]
             n_reg = registration.shape[1]
-            detectable_r2 = minimum_detectable_r2(n_fpc_events, n_dims, n_dims, n_reg, selection.alpha)
             if rao_degrees(n_fpc_events, n_dims, n_dims, n_reg).v <= 0:
                 power_stop_reason = (
                     f"{n_fpc_events} events cannot support a test with {n_dims}-dimensional event features "
                     "(no denominator degrees of freedom remain)."
                 )
-            detectability = describe_detectable(detectable_r2, n_dims)
-            notes.append(f"Detectability (round 1, {n_fpc_events} events, {n_dims} dimensions): "
-                         f"{detectability['statement']}")
-            logger.info(f"[i] {gage} high-flow: {detectability['statement']}")
             if power_stop_reason:
                 notes.append(f"High-flow selection not run: {power_stop_reason}")
             else:
@@ -473,7 +467,7 @@ def run_high_flow_analysis(
                     adequacy,
                     multivariate=n_dims > 1, rng=rng, tier_samples=tier_samples,
                     plot_factory=adequacy_plot_factory(output, gage, "high_flow", feature_names),
-                    label=f"high-flow, basin {gage}",
+                    label=f"high-flow, basin {gage}", events=True,
                 )
                 result_selection = outcome.selection
                 committed_tier, attempted_tiers = outcome.committed_tier, outcome.attempted_tiers
@@ -487,16 +481,21 @@ def run_high_flow_analysis(
                     registration=registration,
                 )
                 if sensitivity is not None:
+                    untestable = sensitivity["untestable_bases"]
                     logger.info(f"[i] Basis sensitivity check for {gage}: "
                                 + ("a candidate was accepted on another basis; review required."
                                    if sensitivity["requires_closer_inspection"]
-                                   else "no candidate accepted on any alternative basis."))
+                                   else "no candidate accepted on any alternative basis.")
+                                + (f" Untestable on {untestable}: too few clusters of events for any p-value below "
+                                   "the level, so nothing could have been accepted there." if untestable else ""))
                     accepted_on = [b["basis"] for b in sensitivity["per_basis"] if b["accepted"]]
                     notes.append(
                         f"Basis sensitivity check: the stopping round was repeated on {len(sensitivity['per_basis'])} "
                         f"alternative basis/bases (each remaining candidate's own curves), at level "
                         f"{sensitivity['level']:.3g} each. A candidate was accepted on: {accepted_on or 'none'} "
                         "(see basis_sensitivity_check)."
+                        + (f" Untestable (too few clusters of events to reach that level): {untestable}."
+                           if untestable else "")
                     )
                 high_flow_events = [ev for ev in expanded_events if ev.event_id in retained_event_ids]
 
@@ -534,7 +533,7 @@ def run_high_flow_analysis(
         event_gallery_path=event_gallery_path, overview_diagnostic_path=overview_diagnostic_path,
         measure=selection.measure, committed_tier=committed_tier, attempted_tiers=attempted_tiers,
         adequacy_floor=adequacy.resolved_effect_size_floor(selection) if selection.measure == CASCADE else None,
-        detectable_r2=detectable_r2, meaningful_r2=selection.meaningful_r2, power_stop_reason=power_stop_reason,
+        meaningful_r2=selection.meaningful_r2, power_stop_reason=power_stop_reason,
     )
     if output_dir is not None:
         # Plots show each formulation's own values and the observations with their gaps.

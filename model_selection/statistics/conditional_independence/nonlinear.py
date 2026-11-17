@@ -14,9 +14,22 @@ conditional mean, so a multiplier bootstrap of the products gives the null
 distribution without resampling the candidate; the multipliers follow the
 dependent wild bootstrap (Shao, 2010). All candidates share each set of
 multipliers. On samples on a regular time grid the multipliers' bandwidth is
-the Politis–White block length of the statistic's own per-sample terms, the
+set from the persistence of the statistic's own per-sample terms, the
 residual feature-map products, from the trace of their autocovariance
-matrices (significance.block_length.trace_autocovariance).
+matrices (significance.block_length), and each draw is divided by a draw of
+the fixed-b variance functional (multipliers.fixed_b_draws). Independent
+units (clusters of events) use the wild cluster restricted bootstrap
+instead: the observations' feature map is rebuilt in every draw as its
+fitted part plus its residual features with one Rademacher sign per unit,
+and residualized again with the observed fit's bandwidth and penalty
+(_cluster_restricted_null).
+
+With censoring at high flow, a censored variable's conditional means (of its
+features and of the variable itself) are estimated by fitting its uncensored
+values and then applying the censoring (regression.censored), not by
+regressing the censored values, whose conditional means bend at the
+threshold. The variable is recognized by its record
+(preprocessing.censoring.censoring_record).
 
 See docs/methods.md, Nonlinear tier.
 """
@@ -25,9 +38,12 @@ from __future__ import annotations
 import numpy as np
 
 from model_selection.statistics.conditional_independence.base import ConditionalIndependenceTest, JointTestResult
-from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights
+from model_selection.preprocessing.censoring import censoring_record
+from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights, fixed_b_draws
+from model_selection.statistics.regression.censored import censored_feature_means, censored_mean
 from model_selection.statistics.regression.kernel_residuals import (
-    BANDWIDTH_MULTIPLIERS, ConditioningRegression, cached_regression, feature_factor_with_cap, low_rank,
+    BANDWIDTH_MULTIPLIERS, ConditioningRegression, cached_regression, feature_factor_split, feature_factor_with_cap,
+    low_rank,
     shared_regression, spectrum_tasks, standardize,
 )
 from model_selection.statistics.significance.block_length import (
@@ -46,10 +62,39 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         (docs/methods.md, Dependence between samples).
     """
     name = "nonlinear"
+    uncensored_feature_means = "smear"
+    """How the feature means of an uncensored one-column variable are
+    estimated given Z. "smear" (the default): derived from the variable's own
+    conditional distribution, its regression mean with the location-scale
+    smearing of its residuals, as for a censored variable without the
+    threshold (regression.censored; docs/methods.md). Each feature is then a
+    known function of one estimated distribution, instead of a separate
+    regression whose errors add up across the many feature columns.
+    "regression": each feature regressed on Z (the earlier method, kept for
+    diagnostics). "smear_remainder": experimental, the smear with the
+    remainder regressed on Z column by column. Variables with several columns
+    always use "regression". The smear is the method for a scalar time series
+    (the pooled pathway); the event pathway sets "regression" for every event
+    sample, whatever its number of components (selection.tiers.build_tier)."""
+    per_column_tuning = False
+    """Experimental (review F3): build the feature factor with the variable's
+    own columns separate and the rest on principal axes
+    (kernel_residuals.feature_factor_split), and tune the regression's
+    bandwidth and penalty for each leading column separately. Off: one
+    bandwidth and penalty for all the feature columns together."""
 
     def __init__(self, run_length: int = DEFAULT_RUN_LENGTH):
         self.run_length = run_length
         self._factors: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
+        self._censored: dict[tuple[int, int], tuple] = {}
+        self._paths: dict[int, tuple] = {}
+        """How each censored variable's conditional means were estimated, with
+        the scale and pool diagnostics, by id of the variable."""
+        self._own_means: dict[tuple[int, int], tuple] = {}
+        """Censored observations' smeared means, by ids of the observations
+        and the regression (the reduced model recurs for every candidate)."""
+        """Censored variables' feature means, by ids of the variable and the
+        regression (both recur across the rounds and comparisons of a trial)."""
         self.magnitude_diagnostics: dict[int, dict] = {}
         """Regression diagnostics of each effect size, by id of the candidate
         array: whether a cross-fitting record was short, and the largest share
@@ -60,9 +105,15 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         arrays recur in every round of a selection trial."""
         cached = self._factors.get(id(X))
         if cached is None or cached[0] is not X:
-            cached = (X, *feature_factor_with_cap(X))
+            cached = (X, *self._make_factor(X))
             self._factors[id(X)] = cached
         return cached[1]
+
+    def _make_factor(self, X: np.ndarray) -> tuple:
+        """(factor, cap share, column groups or None)."""
+        if self.per_column_tuning or self.uncensored_feature_means == "smear_remainder":
+            return feature_factor_split(X)
+        return (*feature_factor_with_cap(X), None)
 
     def _factor_cap(self, X: np.ndarray) -> float:
         cached = self._factors.get(id(X))
@@ -84,7 +135,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         for X in variables:
             cached = self._factors.get(id(X))
             if cached is None or cached[0] is not X:
-                tasks.append(lambda X=X: feature_factor_with_cap(X))
+                tasks.append(lambda X=X: self._make_factor(X))
                 slots.append(("factor", X))
         if not tasks:
             return
@@ -96,30 +147,6 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             if kind == "factor":
                 self._factors[id(X)] = (X, *r)
 
-    def magnitudes(self, candidates: dict, obs, conditioning, time_positions, dependence_lag) -> dict:
-        """magnitude() of several candidates, with the eigendecompositions of
-        their regressions on (Z, C) computed in shared parallel pools, in
-        batches sized to the workers so that memory in flight is bounded."""
-        from model_selection.parallel import batches, parallel_map, run_tasks
-        out = {}
-        reduced = self._regression(conditioning, time_positions, dependence_lag)
-        for group in batches(list(candidates), len(BANDWIDTH_MULTIPLIERS)):
-            regressors = {nm: (as2d(candidates[nm]) if reduced is None
-                               else np.column_stack([as2d(conditioning), as2d(candidates[nm])])) for nm in group}
-            todo = [nm for nm in group if cached_regression(regressors[nm], time_positions, dependence_lag) is None]
-            tasks = [task for nm in todo for task in spectrum_tasks(regressors[nm])]
-            results = run_tasks(tasks) if tasks else []
-            k = len(BANDWIDTH_MULTIPLIERS)
-            full = {nm: ConditioningRegression(regressors[nm], time_positions, buffer=dependence_lag,
-                                               spectra=results[i * k:(i + 1) * k]) for i, nm in enumerate(todo)}
-            for nm in group:
-                if nm not in full:
-                    full[nm] = shared_regression(regressors[nm], time_positions, buffer=dependence_lag)
-            values = parallel_map(lambda nm: self.magnitude(candidates[nm], obs, conditioning, time_positions,
-                                                            dependence_lag, 0.0, np.zeros(1), full=full[nm]), group)
-            out.update(zip(group, values))
-        return out
-
     def _residuals(self, X: np.ndarray, regression: ConditioningRegression | None):
         """(centred residual coordinates of the feature map, residuals of the
         variable's own standardized columns, cross-fitted R^2 of those columns)."""
@@ -127,10 +154,46 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         own = standardize(X)
         if regression is None:
             return L - L.mean(axis=0), own, 0.0
-        E, E_own = regression.residuals(L, own)
+        record = censoring_record(X)
+        groups = self._factors[id(X)][3]
+        if record is None and self.uncensored_feature_means != "regression" and as2d(X).shape[1] == 1:
+            means, mean, _ = censored_feature_means(X, L, as2d(X)[:, 0], None, regression)
+            E = L - means
+            if self.uncensored_feature_means == "smear_remainder":
+                E = regression.residuals_by_group(E - E.mean(axis=0), groups)
+                E_own = E[:, :1]
+            else:
+                E_own = _own_residuals(X, mean)
+        elif record is None and groups is not None:
+            E = regression.residuals_by_group(L, groups)
+            E_own = E[:, :own.shape[1]]
+        elif record is None:
+            E, E_own = regression.residuals(L, own)
+        else:
+            key = (id(X), id(regression))
+            cached = self._censored.get(key)
+            if cached is None or cached[0] is not X or cached[1] is not regression:
+                uncensored, threshold = record
+                cached = (X, regression, *censored_feature_means(X, L, uncensored, threshold, regression))
+                self._paths[id(X)] = (X, {"censored_means": "fit_then_censor", **cached[4]})
+                self._censored[key] = cached
+            means, mean = cached[2], cached[3]
+            E, E_own = L - means, _own_residuals(X, mean)
         tss = float(np.sum(own ** 2))
         r2_own = 1.0 - float(np.sum(E_own ** 2)) / tss if tss > 0 else 0.0
         return E - E.mean(axis=0), E_own - E_own.mean(axis=0), r2_own
+
+    def censored_path(self, X: np.ndarray, regression) -> dict:
+        """How X's conditional means were estimated: {} for an uncensored
+        variable; for a censored one, "fit_then_censor" with the scale and
+        pool diagnostics, or "regression" where there was nothing to condition
+        on (its conditional mean is then its mean)."""
+        if censoring_record(X) is None:
+            return {}
+        if regression is None:
+            return {"censored_means": "regression"}
+        entry = self._paths.get(id(X))
+        return dict(entry[1]) if entry is not None and entry[0] is X else {"censored_means": "fit_then_censor"}
 
     def _regression(self, conditioning, time_positions, dependence_lag) -> ConditioningRegression | None:
         """Cross-fitted regression on the conditioning set, reused for the
@@ -139,34 +202,277 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             return None
         return shared_regression(conditioning, time_positions, buffer=dependence_lag)
 
+    def residual_effects(self, candidate, obs, conditioning, time_positions, dependence_lag) -> dict:
+        """Experimental effect sizes from the residuals the test uses (review
+        F4), reported alongside the effect size, not used in decisions.
+
+        plain    : the squared correlation of the candidate's and the
+                   observations' own-value residuals given Z: the R^2 of the
+                   partially linear model's candidate term (Robinson, 1988;
+                   Chernozhukov et al., 2018), whose error is the product of
+                   the two regressions' errors
+        features : the cross-fitted R^2 of a ridge regression of the
+                   observations' own-value residuals on the candidate's
+                   residual feature coordinates, so that contributions
+                   nonlinear in the candidate count; blocks as in the tier's
+                   cross-fitting, the penalty chosen by the same blocks."""
+        from model_selection.statistics.regression.kernel_residuals import _folds, crossfit_blocks
+        regression = self._regression(conditioning, time_positions, dependence_lag)
+        E_c, own_c, _ = self._residuals(candidate, regression)
+        _, own_o, _ = self._residuals(obs, regression)
+        c, o = own_c[:, 0] - own_c[:, 0].mean(), own_o[:, 0] - own_o[:, 0].mean()
+        denom = float(np.sum(c ** 2) * np.sum(o ** 2))
+        plain = float(np.sum(c * o) ** 2 / denom) if denom > 0 else 0.0
+        X = E_c - E_c.mean(axis=0)
+        block, k, _ = crossfit_blocks(time_positions, dependence_lag)
+        folds, _ = _folds(block, k, X.shape[1])
+        scale = float(np.trace(X.T @ X)) / max(X.shape[0], 1)
+        best = None
+        for lam in scale * np.logspace(-4, 2, 13):
+            pred = np.zeros_like(o)
+            for p_idx, f_idx in folds:
+                Xf, of = X[f_idx], o[f_idx]
+                mx, mo = Xf.mean(axis=0), of.mean()
+                w = np.linalg.solve((Xf - mx).T @ (Xf - mx) + lam * len(f_idx) * np.eye(X.shape[1]),
+                                    (Xf - mx).T @ (of - mo))
+                pred[p_idx] = mo + (X[p_idx] - mx) @ w
+            ss = float(np.sum((o - pred) ** 2))
+            if best is None or ss < best:
+                best = ss
+        features = 1.0 - best / float(np.sum(o ** 2)) if np.sum(o ** 2) > 0 else 0.0
+        return {"plain": plain, "features": features}
+
+    def projected_effect(self, candidate, obs, conditioning, time_positions, dependence_lag, extra=None) -> dict:
+        """Experimental effect size (review of the censored effect size):
+        the held-out projected partial R^2, reported, not used in decisions.
+
+        e is the observations' own-value residual given Z, and D the
+        residuals given Z of the candidate's own values and, for a censored
+        candidate, of its exceedance indicator 1{C* > t} (whose conditional
+        mean is the share of the fit-then-censor draws above t). A direction
+        h = x'beta, x = [D, Phi (x) D], is fitted to e by ridge regression on
+        the tier's own cross-fitting blocks, Phi the leading columns of the
+        tier's kernel factor on Z (so the candidate's coefficient may vary
+        with the state), the bandwidth and penalty chosen by the same blocked
+        cross-validation. With S = sum e h over the held-out blocks and V the
+        blocks' variance estimate of S,
+            effect = max(S^2 - V, 0) / (sum h^2 sum e^2)   (0 if S <= 0).
+        Any direction with E[h | Z] = 0 gives a lower bound on the
+        candidate's share of the variation beyond Z (Zhang and Janson, 2020),
+        and under the null each e h has mean equal to the product of the two
+        regressions' errors (Lundborg et al., 2024).
+
+        Returns {"projected": the effect with up to VARYING_RANK columns of
+        Phi, "projected_half": with half as many (the rank check, as for the
+        tier's kernel factors), "constant": with D alone (a coefficient that
+        does not vary with Z)}."""
+        regression = self._regression(conditioning, time_positions, dependence_lag)
+        _, own_o, _ = self._residuals(obs, regression)
+        _, own_c, _ = self._residuals(candidate, regression)
+        e = own_o[:, 0] - own_o[:, 0].mean()
+        D = [own_c[:, 0]]
+        record = censoring_record(candidate)
+        if record is not None and regression is not None:
+            from model_selection.statistics.regression.censored import location_scale, reduced_pool
+            U, t = record
+            mu, scale, pool, _ = location_scale(U, regression)
+            values, weights = reduced_pool(pool)
+            p_exceed = (mu[:, None] + scale[:, None] * values[None, :] > t) @ weights
+            D.append((np.asarray(U) > t).astype(float) - p_exceed)
+        D = np.column_stack([d / np.sqrt(np.mean(d ** 2)) if np.mean(d ** 2) > 0 else d for d in D])
+        if regression is None:
+            folds = [(np.arange(len(e)), np.arange(len(e)))]
+            phis = [np.zeros((len(e), 0))]
+        else:
+            folds = regression._folds
+            phis = []
+            for spectrum in regression.spectra:
+                s_, U_ = spectrum[0], spectrum[1]
+                order = np.argsort(s_)[::-1][:VARYING_RANK]
+                phis.append(U_[:, order] * np.sqrt(s_[order]))
+        if extra is not None:
+            X = as2d(extra)
+            phis_extra = [np.column_stack([D, X / np.sqrt(np.mean(X ** 2, axis=0))] + [P * D[:, [j]] for j in range(D.shape[1])]) for P in phis]
+            return {"stacked": _projected_r2(e, phis_extra, folds)}
+        out = {"constant": _projected_r2(e, [D], folds)}
+        full = [np.column_stack([D] + [P * D[:, [j]] for j in range(D.shape[1])]) for P in phis]
+        half = [np.column_stack([D] + [P[:, :P.shape[1] // 2] * D[:, [j]] for j in range(D.shape[1])]) for P in phis]
+        out["projected"] = _projected_r2(e, full, folds)
+        out["projected_half"] = _projected_r2(e, half, folds)
+        return out
+
+    def _feature_direction(self, candidate, obs, conditioning, time_positions, dependence_lag) -> dict:
+        """The effect size's parts (magnitude): the held-out error reduction
+        of the observations' residuals on Z by the feature direction, at the
+        factor's rank and at half of it, the correlation form for one
+        observation column, and diagnostics."""
+        from model_selection.statistics.regression.kernel_residuals import (
+            BANDWIDTH_MULTIPLIERS as MULTS, _median_bandwidth, _rbf_column, crossfit_blocks, _folds as make_folds,
+            low_rank, pivoted_cholesky, standardize as kstd,
+        )
+        regression = self._regression(conditioning, time_positions, dependence_lag)
+        E_c, own_c, _ = self._residuals(candidate, regression)
+        _, own_o, _ = self._residuals(obs, regression)
+        e = own_o - own_o.mean(axis=0)
+        D = [own_c[:, j] for j in range(own_c.shape[1])]
+        record = censoring_record(candidate)
+        if record is not None and regression is not None:
+            from model_selection.statistics.regression.censored import location_scale, reduced_pool
+            U, t = record
+            mu, scale, pool, _ = location_scale(U, regression)
+            values, weights = reduced_pool(pool)
+            p_exceed = (mu[:, None] + scale[:, None] * values[None, :] > t) @ weights
+            D.append((np.asarray(U) > t).astype(float) - p_exceed)
+        D = [d / np.sqrt(np.mean(d ** 2)) if np.mean(d ** 2) > 0 else d for d in D]
+        F = np.column_stack(D + [E_c])
+        n = F.shape[0]
+        cap = low_rank() or n
+        cap_share = 0.0
+        if regression is None:
+            block, k, short = crossfit_blocks(time_positions, dependence_lag)
+            folds, kept = make_folds(block, k, 1)
+            designs, blocks_short = [F], bool(short or kept)
+        else:
+            folds, blocks_short = regression._folds, regression.blocks_short
+            Zs = kstd(as2d(np.asarray(conditioning, dtype=float)))
+            base, sq = _median_bandwidth(Zs), (Zs ** 2).sum(1)
+            diag = 2.0 * (F ** 2).sum(1)
+            designs = []
+            for m in MULTS:
+                rbf = _rbf_column(Zs, sq, base * m)
+                G, share = pivoted_cholesky(diag.copy(), lambda p, rbf=rbf: (1.0 + rbf(p)) * (F @ F[p]), cap,
+                                            kind="effect")
+                designs.append(G)
+                cap_share = max(cap_share, share)
+        # Several observation columns are whitened, so that the penalty and
+        # bandwidth are chosen for every column alike; the determinant ratio
+        # does not depend on the whitening.
+        w, V = np.linalg.eigh(e.T @ e / n)
+        keep = w > max(float(w.max()), 0.0) * e.shape[1] * np.finfo(float).eps
+        ew = e @ (V[:, keep] / np.sqrt(w[keep]))
+        split = True
+        if ew.shape[1] == 0:
+            effect = half = corr = 0.0
+        else:
+            h, split = _ridge_direction(ew, designs, folds)
+            h_half, _ = _ridge_direction(ew, [G[:, :max(1, G.shape[1] // 2)] for G in designs], folds)
+            effect, half = _error_reduction(ew, h), _error_reduction(ew, h_half)
+            corr = _held_out_r2(ew[:, 0], h[:, 0], folds) if ew.shape[1] == 1 else float("nan")
+        return {"features": effect, "features_half": half, "features_corr": corr,
+                "diagnostics": {"crossfit_blocks_short": bool(blocks_short),
+                                "low_rank_cap_share": max(cap_share, 0.0 if regression is None
+                                                          else regression.cap_share),
+                                "low_rank_rank_change": 0.0 if regression is None else regression.rank_change,
+                                "effect_half_rank_change": abs(effect - half),
+                                "effect_tuning_split": bool(split)}}
+
+    def feature_effect(self, candidate, obs, conditioning, time_positions, dependence_lag) -> dict:
+        """The effect size (magnitude) with its rank check and correlation
+        form, for diagnostics: {"features", "features_half", "features_corr"}."""
+        out = self._feature_direction(candidate, obs, conditioning, time_positions, dependence_lag)
+        out.pop("diagnostics")
+        return out
+
     def magnitude(self, candidate, obs, conditioning, time_positions, dependence_lag, observed, null_draws,
                   grid_step=None, full: ConditioningRegression | None = None):
         """The candidate's share of the variation in the observations left
-        unexplained by Z: one minus the ratio of the generalized variances
-        (determinants of the residual covariance matrices) of the
-        observations' cross-fitted residuals on (Z, C) and on Z, both by the
-        tier's kernel ridge regression. For linear conditional means this is
-        the set-correlation R^2 of the linear tier (Cohen, 1982). Cross-fitted
-        residuals carry no in-sample optimism, so no null mean is
-        subtracted."""
-        own_o = standardize(obs)
-        reduced = self._regression(conditioning, time_positions, dependence_lag)
-        E_r = own_o - own_o.mean(axis=0) if reduced is None else reduced.residuals(own_o)[0]
-        regressors = as2d(candidate) if reduced is None else np.column_stack([as2d(conditioning), as2d(candidate)])
-        if full is None:
-            full = shared_regression(regressors, time_positions, buffer=dependence_lag)
-        E_f = full.residuals(own_o)[0]
-        regs = [full] + ([] if reduced is None else [reduced])
-        self.magnitude_diagnostics[id(candidate)] = {
-            "crossfit_blocks_short": any(r.blocks_short for r in regs),
-            "low_rank_cap_share": max(r.cap_share for r in regs),
-            "low_rank_rank_change": max(r.rank_change for r in regs),
-        }
-        sign_r, logdet_r = np.linalg.slogdet(E_r.T @ E_r)
-        sign_f, logdet_f = np.linalg.slogdet(E_f.T @ E_f)
-        if sign_r <= 0 or sign_f <= 0:
-            return 0.0, None
-        return float(1.0 - np.exp(logdet_f - logdet_r)), None
+        unexplained by Z, as the held-out error reduction of a direction
+        built from the candidate and Z only (docs/methods.md, Nonlinear tier).
+
+        F holds the candidate's own residuals given Z and, when censored, its
+        exceedance-indicator residual (each scaled to unit root mean square),
+        then its residual feature coordinates (the test's R_phi). The
+        direction h is ridge regression of e, the observations' residuals on
+        Z, on the factor of the kernel (1 + k_Z) * (F F'), k_Z the tier's
+        radial basis function kernel on the standardized Z at each of its
+        bandwidths: functions b(Z)'F whose coefficients may be constant or
+        vary smoothly with the state (varying-coefficient models; Hastie and
+        Tibshirani, 1993), and, through the features, non-monotone in the
+        candidate. The factor is pivoted Cholesky to the tier's rank cap; the
+        bandwidth and penalty are chosen by the tier's blocked
+        cross-validation, and each block is predicted by a fit without it.
+        The effect is
+            max(0, 1 - det((e - h)'(e - h)) / det(e'e)),
+        for one column 1 - SS(e - h) / SS(e). For any h fitted without the
+        predicted block, its expectation is at most the share of e's
+        variation explained by E[O | Z, C], so it is a lower bound on the
+        candidate's share. Every regressor is a function of Z and C only, so
+        under the null h's covariance with e is a product of the two
+        regressions' errors, as for the test (Shah and Peters, 2020).
+        `full` is accepted for compatibility and not used. Returns
+        (effect, None)."""
+        out = self._feature_direction(candidate, obs, conditioning, time_positions, dependence_lag)
+        self.magnitude_diagnostics[id(candidate)] = out["diagnostics"]
+        return out["features"], None
+
+    def magnitudes(self, candidates: dict, obs, conditioning, time_positions, dependence_lag) -> dict:
+        """magnitude() of several candidates, in parallel."""
+        from model_selection.parallel import parallel_map
+        names = list(candidates)
+        values = parallel_map(lambda nm: self.magnitude(candidates[nm], obs, conditioning, time_positions,
+                                                        dependence_lag, 0.0, np.zeros(1)), names)
+        return dict(zip(names, values))
+
+    def _cluster_restricted_null(self, names, fitted, obs, E_o, regression, weight_chunks) -> tuple[np.ndarray, dict]:
+        """Null draws for independent units (clusters of events): the wild
+        cluster restricted bootstrap (Cameron, Gelbach and Miller, 2008),
+        written out for the tier's cross-fitted kernel ridge regression.
+
+        With A the regression's residual maker at the bandwidth and penalty
+        chosen for the observations' feature map L, exactly as for the observed
+        residual features, and C the centring, so that E_o = C A L
+        (ConditioningRegression.residual_operator; _residuals), each draw
+        rebuilds the feature map under the null, L* = (L - A L) + w o (A L),
+        its fitted part plus its uncentred residuals with one Rademacher sign
+        per unit, and recomputes the residual features E* = C A L* and the RV
+        coefficient with each candidate's residual features, as the observed
+        statistic is computed. The draw with every sign +1 is the observed
+        statistic. C A is linear, so C A (L - A L) is computed once and every
+        draw of a chunk is residualized in one pass. In each draw a fold's
+        prediction uses only the other folds' rebuilt values, so a unit's sign
+        never enters its own prediction; the bandwidth and penalty, fixed
+        before any draw, hold no draw's signs. Holding them fixed rather than
+        choosing them again in each draw is an approximation, asymptotic (as
+        in Hardle and Mammen, 1993; Lin, 1997). No published result covers
+        this construction with few clusters; its level there rests on
+        simulation (docs/methods.md, Dependence between samples).
+
+        Returns the draws and a record: whether A L reproduced E_o (it does
+        on the regression path, which every event sample takes;
+        selection.tiers.build_tier), and the share of the fitted part's
+        residual, ||C A (L - A L)||^2 / ||E_o||^2, which grows with the smoothing
+        bias when Z is informative."""
+        L = self._factor(obs)
+        if regression is None:
+            residualize = lambda Y: Y - Y.mean(axis=0)
+        else:
+            residualize = regression.residual_operator(L)
+        # The observed residual features are the cross-fitted residuals, centred
+        # (_residuals): E_o = C A L. The data are rebuilt from the uncentred
+        # residuals A L, and each draw centred after its residualization.
+        apply = lambda Y: (lambda R: R - R.mean(axis=0))(residualize(Y))
+        resid = residualize(L)
+        E_o = np.asarray(E_o, dtype=float)
+        identity_error = float(np.linalg.norm(apply(L) - E_o) / max(np.linalg.norm(E_o), 1e-300))
+        base = apply(L - resid)
+        record = {"cluster_draws_reproduce_statistic": bool(identity_error < 1e-8),
+                  "cluster_draws_fitted_share": float(np.sum(base ** 2) / max(np.sum(E_o ** 2), 1e-300))}
+        n, p = E_o.shape
+        E_cs = [fitted[nm][0] for nm in names]
+        norms_c = [float(np.linalg.norm(E_c.T @ E_c)) for E_c in E_cs]
+        chunks = []
+        for _, _, weights in weight_chunks():
+            B = weights.shape[0]
+            stacked = (weights[:, :, None] * resid[None, :, :]).transpose(1, 0, 2).reshape(n, -1)
+            R = apply(stacked).reshape(n, B, p) + base[:, None, :]          # (n, B, p)
+            norm_r = np.linalg.norm(np.einsum("nbp,nbq->bpq", R, R), axis=(1, 2))
+            out = np.zeros((B, len(names)))
+            for j, (E_c, norm_c) in enumerate(zip(E_cs, norms_c)):
+                cross = np.einsum("nk,nbp->bkp", E_c, R)
+                denom = norm_c * norm_r
+                out[:, j] = np.where(denom > 0, np.sum(cross ** 2, axis=(1, 2)) / np.where(denom > 0, denom, 1.0), 0.0)
+            chunks.append(out)
+        return np.concatenate(chunks, axis=0), record
 
     def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
         names = list(candidates)
@@ -204,8 +510,13 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             time_positions, dependence_lag,
             [(lambda nm=nm: feature_terms(fitted[nm][0])[1]) if features else centred_products(fitted[nm][0])[1]
              for nm in names],
-            self.run_length, grid_step)
+            self.run_length, grid_step,
+            factors=[((lambda nm=nm: fitted[nm][0]), (lambda: E_o)) if features
+                     else (fitted[nm][0] @ fitted[nm][0].T, G_o) for nm in names])
         block = resolved.length
+        # Independent units (clusters of events) use the wild cluster restricted
+        # bootstrap instead of multipliers on the products (below).
+        units = resolved.independent_units
         # All candidates share one set of multipliers. They are generated in
         # chunks of draws, and regenerated for each candidate from the same
         # generator state, so that only one chunk and one candidate's terms are
@@ -218,7 +529,8 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             gen.bit_generator.state = start_state
             for start in range(0, n_resamples, MULTIPLIER_CHUNK):
                 stop = min(start + MULTIPLIER_CHUNK, n_resamples)
-                yield start, stop, dependent_wild_weights(time_positions, block, stop - start, gen)
+                yield start, stop, dependent_wild_weights(time_positions, block, stop - start, gen,
+                                                          independent="rademacher" if units else "gaussian")
             rng.bit_generator.state = gen.bit_generator.state
 
         if not names:                                  # the generator advances as for any draws
@@ -234,7 +546,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
                 total, Fc, denom = feature_terms(E_c)
             else:
                 A, P, denom = centred_products(E_c)
-            for start, stop, weights in weight_chunks():
+            for start, stop, weights in ([] if units else weight_chunks()):
                 if denom > 0 and features:
                     null[start:stop, j] = np.sum((weights @ Fc) ** 2, axis=1) / denom
                 elif denom > 0:
@@ -251,10 +563,191 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
                 "r2_candidate_on_selected": r2_c,
                 "r2_obs_on_selected": r2_o,
                 "samples_per_conditioning_dimension": n / max(k, 1),
+                **self.censored_path(candidates[nm], regression),
             }
+        cluster_record = {}
+        if units:
+            null, cluster_record = self._cluster_restricted_null(names, fitted, obs, E_o, regression, weight_chunks)
+        # The fixed-b reference distribution, as in the linear tier.
+        q = fixed_b_draws(resolved.bandwidth_fraction, n_resamples, rng, n_steps=resolved.grid_length)
+        null /= q[:, None]
         dependence = resolved.to_record()
         dependence["crossfit_blocks_short"] = bool(regression is not None and regression.blocks_short)
         dependence["low_rank_cap_share"] = 0.0 if regression is None else regression.cap_share
         dependence["low_rank_rank_change"] = 0.0 if regression is None else regression.rank_change
         dependence["feature_factor_cap_share"] = max(self._factor_cap(X) for X in [obs] + [candidates[nm] for nm in names])
-        return JointTestResult(names, observed, null, diagnostics, block_length=block, dependence=dependence)
+        dependence.update({f"obs_{k}": v for k, v in self.censored_path(obs, regression).items()})
+        dependence.update(cluster_record)
+        return JointTestResult(names, observed, null, diagnostics, block_length=block, dependence=dependence,
+                               fixed_b=None if resolved.bandwidth_fraction is None else q)
+
+
+def _own_residuals(X: np.ndarray, conditional_mean: np.ndarray) -> np.ndarray:
+    """Residuals of X's own standardized column about a given conditional
+    mean of X, on the scale of standardize(X)."""
+    x = as2d(np.asarray(X, dtype=float))[:, 0]
+    sd = x.std()
+    return ((x - conditional_mean) / (sd if sd > 0 else 1.0))[:, None]
+
+
+VARYING_RANK = 300
+"""Columns of the tier's kernel factor on Z through which the projected
+effect's coefficient varies with the state (projected_effect): a cap for
+cost, checked at half as many, as the tier's kernel factors are."""
+
+
+MIN_SPLIT_BLOCKS = 8
+"""Fewest cross-fitting blocks for which the effect size's tuning is split
+into halves (_ridge_direction): each half then keeps at least four blocks,
+one of which (at the join) is left out of the tuning errors."""
+
+
+def _ridge_paths(X: np.ndarray, e: np.ndarray, G: np.ndarray, c: np.ndarray, out: np.ndarray, pred: np.ndarray):
+    """Predictions at `pred` of ridge regressions of e on X, one per penalty
+    (RIDGE_PENALTIES, relative to the mean eigenvalue of the fitting Gram
+    matrix), fitted on the rows whose Gram matrix G and cross-product c are
+    given, less the rows `out`."""
+    from model_selection.statistics.regression.kernel_residuals import RIDGE_PENALTIES
+    Gf, cf = G - X[out].T @ X[out], c - X[out].T @ e[out]
+    ev, Q = np.linalg.eigh((Gf + Gf.T) / 2.0)
+    scale = max(float(np.trace(Gf)) / X.shape[1], 1e-300)
+    A, q = X[pred] @ Q, Q.T @ cf
+    return [A @ (q / (np.clip(ev, 0, None) + lam * scale)[:, None]) for lam in RIDGE_PENALTIES]
+
+
+def _ridge_direction(e: np.ndarray, designs: list, folds: list) -> tuple[np.ndarray, bool]:
+    """(held-out predictions of e, whether the tuning was split): ridge
+    regression of e on one of `designs` (one per bandwidth), each block
+    predicted by a fit on its fold's fitting samples.
+
+    The design and penalty used for a block are chosen without that block:
+    the blocks are split into two contiguous halves, and the design and
+    penalty for the blocks of one half are those with the smallest blocked
+    cross-validation error within the other half, whose block next to the
+    join is left out of the errors (nested cross-validation with two outer
+    folds; Stone, 1974; Varma and Simon, 2006). Choosing them by the
+    held-out errors of the predicted blocks themselves would make the
+    reported error the smallest of many noisy estimates, which is
+    optimistic. With fewer than MIN_SPLIT_BLOCKS blocks the design and
+    penalty are chosen by all blocks' held-out errors, and the second value
+    is False."""
+    e2 = e if e.ndim == 2 else e[:, None]
+    designs = [X for X in designs if X.shape[1] > 0]
+    if not designs:
+        return np.zeros_like(e), False
+    n, K = e2.shape[0], len(folds)
+    every = np.arange(n)
+    # Each option's held-out predictions of every block, from the usual fits.
+    full = []
+    for X in designs:
+        G, c = X.T @ X, X.T @ e2
+        preds = None
+        for pred, fit in folds:
+            out = np.setdiff1d(every, fit, assume_unique=True)
+            paths = _ridge_paths(X, e2, G, c, out, pred)
+            if preds is None:
+                preds = [np.zeros_like(e2) for _ in paths]
+            for j, h in enumerate(paths):
+                preds[j][pred] = h
+        full.append(preds)
+    split = K >= MIN_SPLIT_BLOCKS
+    h = np.zeros_like(e2)
+    if not split:
+        d, j = min(((d, j) for d in range(len(full)) for j in range(len(full[d]))),
+                   key=lambda dj: float(np.sum((e2 - full[dj[0]][dj[1]]) ** 2)))
+        h = full[d][j]
+    else:
+        half = K // 2
+        halves = (list(range(half)), list(range(half, K)))
+
+        def tuned(inside: list, skip: int) -> tuple[int, int]:
+            rows = np.concatenate([folds[i][0] for i in inside])
+            err = None
+            for d, X in enumerate(designs):
+                Xh, eh = X[rows], e2[rows]
+                G, c = Xh.T @ Xh, Xh.T @ eh
+                pos = {r: k for k, r in enumerate(rows)}
+                for i in inside:
+                    if i == skip:
+                        continue
+                    pred = folds[i][0]
+                    out = np.concatenate([folds[m][0] for m in (i - 1, i, i + 1) if m in inside])
+                    local_out = np.array([pos[r] for r in out])
+                    local_pred = np.array([pos[r] for r in pred])
+                    paths = _ridge_paths(Xh, eh, G, c, local_out, local_pred)
+                    if err is None:
+                        err = np.zeros((len(designs), len(paths)))
+                    for j, hp in enumerate(paths):
+                        err[d, j] += float(np.sum((eh[local_pred] - hp) ** 2))
+            d, j = np.unravel_index(int(np.argmin(err)), err.shape)
+            return int(d), int(j)
+
+        # The first half's blocks are tuned within the second half, without its
+        # first block (next to the join), and the reverse.
+        for served, inside, skip in ((halves[0], halves[1], halves[1][0]), (halves[1], halves[0], halves[0][-1])):
+            d, j = tuned(inside, skip)
+            for i in served:
+                pred = folds[i][0]
+                h[pred] = full[d][j][pred]
+    return (h if e.ndim == 2 else h[:, 0]), split
+
+
+def _error_reduction(e: np.ndarray, h: np.ndarray) -> float:
+    """max(0, 1 - det((e - h)'(e - h)) / det(e'e)) for residual columns e
+    and their held-out predictions h."""
+    e, h = as2d(e), as2d(h)
+    sign_r, logdet_r = np.linalg.slogdet(e.T @ e)
+    sign_f, logdet_f = np.linalg.slogdet((e - h).T @ (e - h))
+    if sign_r <= 0 or sign_f <= 0:
+        return 0.0
+    return max(0.0, float(1.0 - np.exp(logdet_f - logdet_r)))
+
+
+def _held_out_r2(e: np.ndarray, h: np.ndarray, folds: list) -> float:
+    """max(S^2 - V, 0) / (sum h^2 sum e^2), 0 if S <= 0: S = sum e h, V the
+    variance estimate of S from its sums over the blocks."""
+    S = float(e @ h)
+    K = len(folds)
+    if S <= 0 or K < 2:
+        return 0.0
+    Sk = np.array([float(e[p] @ h[p]) for p, _ in folds])
+    V = K / (K - 1) * float(np.sum((Sk - S / K) ** 2))
+    denom = float(np.sum(h ** 2) * np.sum(e ** 2))
+    return max(S ** 2 - V, 0.0) / denom if denom > 0 else 0.0
+
+
+def _projected_r2(e: np.ndarray, designs: list, folds: list) -> float:
+    """The held-out projected partial R^2 of e on the best of `designs`
+    (one per bandwidth), each fitted by ridge regression on the folds'
+    fitting samples, the design and penalty chosen by the held-out error;
+    S^2 less the blocks' variance estimate of S (projected_effect)."""
+    from model_selection.statistics.regression.kernel_residuals import RIDGE_PENALTIES
+    best = None
+    for X in designs:
+        if X.shape[1] == 0:
+            continue
+        G, c = X.T @ X, X.T @ e
+        preds = {j: np.zeros_like(e) for j in range(len(RIDGE_PENALTIES))}
+        for pred, fit in folds:
+            out = np.setdiff1d(np.arange(len(e)), fit, assume_unique=True)
+            Gf, cf = G - X[out].T @ X[out], c - X[out].T @ e[out]
+            ev, Q = np.linalg.eigh((Gf + Gf.T) / 2.0)
+            scale = max(float(np.trace(Gf)) / X.shape[1], 1e-300)
+            A, q = X[pred] @ Q, Q.T @ cf
+            for j, lam in enumerate(RIDGE_PENALTIES):
+                preds[j][pred] = A @ (q / (np.clip(ev, 0, None) + lam * scale))
+        for j, h in preds.items():
+            ss = float(np.sum((e - h) ** 2))
+            if best is None or ss < best[0]:
+                best = (ss, h)
+    if best is None:
+        return 0.0
+    h = best[1]
+    S = float(e @ h)
+    K = len(folds)
+    if S <= 0 or K < 2:
+        return 0.0
+    Sk = np.array([float(e[p] @ h[p]) for p, _ in folds])
+    V = K / (K - 1) * float(np.sum((Sk - S / K) ** 2))
+    denom = float(np.sum(h ** 2) * np.sum(e ** 2))
+    return max(S ** 2 - V, 0.0) / denom if denom > 0 else 0.0

@@ -6,6 +6,7 @@ of correlation between consecutive clusters."""
 import numpy as np
 import pytest
 
+from model_selection.statistics.adequacy.linearity import LinearityTest
 from model_selection.statistics.conditional_independence import LinearResidualTest
 from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights
 from model_selection.statistics.significance.block_length import resolve_block, sampling_stride
@@ -123,3 +124,139 @@ def test_consecutive_cluster_correlation_detects_dependence_across_clusters():
     persistent = consecutive_cluster_correlation(np.repeat(level, 2)[:, None] + 0.1 * rng.normal(size=(300, 1)), pos)
     assert persistent["significant"] and persistent["correlation"] > 0.5
     assert consecutive_cluster_correlation(np.ones((4, 1)), np.array([0, 0, 2, 2]))["correlation"] is None
+
+
+def test_minimum_units_follows_the_smallest_sign_flip_p_value():
+    from model_selection.statistics.significance.clusters import minimum_units, smallest_p_value
+    assert smallest_p_value(6) == 2.0 ** -5
+    assert minimum_units(0.05) == 6         # 2^-4 = 0.0625 >= 0.05 > 2^-5
+    assert minimum_units(0.005) == 9        # 2^-7 >= 0.005 > 2^-8
+
+
+def test_nonlinear_cluster_draw_with_every_sign_positive_is_the_observed_statistic():
+    """The nonlinear tier's cluster null rebuilds the observations' feature
+    map and residualizes it with the observed fit's tuning, so the draw with
+    every sign +1 is the observed statistic, with or without a conditioning
+    set, and the run records that it was reproduced."""
+    from model_selection.statistics.conditional_independence import NonlinearResidualTest
+    rng = np.random.default_rng(7)
+    labels = np.repeat(np.arange(12), 3)
+    pos, lag = cluster_coordinates(labels)
+    z = np.repeat(rng.normal(size=(12, 1)), 3, axis=0) + 0.3 * rng.normal(size=(labels.size, 1))
+    o = np.column_stack([np.cos(z[:, 0]), z[:, 0]]) + 0.5 * rng.normal(size=(labels.size, 2))
+    for conditioning in (None, z):
+        test = NonlinearResidualTest()
+        test.uncensored_feature_means = "regression"
+        r = test.run({"c": rng.normal(size=(labels.size, 2))}, o, conditioning, 99, rng, pos, lag)
+        assert r.dependence["independent_units"] and r.dependence["cluster_draws_reproduce_statistic"]
+
+
+def test_cluster_scaling_is_hc2_for_single_events_and_cr2_for_clusters():
+    from model_selection.statistics.significance.clusters import cluster_scaled_residuals, orthonormal_residual_maker
+    rng = np.random.default_rng(1)
+    n = 30
+    X = np.column_stack([np.ones(n), rng.normal(size=(n, 2))])
+    M = orthonormal_residual_maker(X)
+    r = M @ rng.normal(size=n)
+    h = np.sum(np.linalg.qr(X)[0] ** 2, axis=1)
+    assert np.allclose(cluster_scaled_residuals(r, M, np.arange(n)), r / np.sqrt(1 - h))
+    labels = np.repeat(np.arange(10), 3)
+    scaled = cluster_scaled_residuals(r, M, labels)
+    for g in range(10):                       # (I - P_gg)^(-1/2) r_g (Bell and McCaffrey, 2002)
+        idx = labels == g
+        vals, vecs = np.linalg.eigh(M[np.ix_(idx, idx)])
+        assert np.allclose(scaled[idx], vecs @ ((vecs.T @ r[idx]) / np.sqrt(vals)))
+
+
+def test_sign_flip_null_holds_its_level_with_ten_clusters():
+    """Ten clusters of four events with a shared component within each
+    cluster: with one Gaussian multiplier per cluster the null is the normal
+    law with the clusters' sample variance and rejects about 10% at 5%
+    (Cameron, Gelbach and Miller, 2008); one sign per cluster holds the
+    level. 400 replicates, standard error about 1.1 points."""
+    rng = np.random.default_rng(11)
+    reps, m, size = 400, 10, 4
+    labels = np.repeat(np.arange(m), size)
+    n = labels.size
+    pos, lag = cluster_coordinates(labels)
+    rejections = 0
+    for _ in range(reps):
+        c = np.repeat(rng.normal(size=m), size) + 0.5 * rng.normal(size=n)
+        o = np.repeat(rng.normal(size=m), size) + 0.5 * rng.normal(size=n)
+        r = LinearResidualTest().run({"c": c}, o, None, 199, rng, pos, lag)
+        rejections += (1 + np.sum(r.null[:, 0] >= r.observed[0])) / 200 < 0.05
+    assert rejections / reps <= 0.075
+
+
+def test_a_round_with_too_few_clusters_is_untestable_not_unselected():
+    from model_selection.selection import SelectionSample, build_tier, greedy_forward_selection
+    from model_selection.selection.config import SelectionConfig
+    rng = np.random.default_rng(3)
+    labels = np.repeat(np.arange(5), 4)
+    pos, lag = cluster_coordinates(labels)
+    o = rng.normal(size=labels.size)
+    sample = SelectionSample({"a": o + 0.1 * rng.normal(size=o.size), "b": rng.normal(size=o.size)}, o, pos, lag,
+                             clusters=labels)
+    tier = build_tier("linear", SelectionConfig())
+    result = greedy_forward_selection(sample, tier, n_permutations=199, rng=rng)
+    assert result.untestable and result.selected == [] and "untestable" in result.stopped_reason
+
+
+def test_event_tiers_take_the_regression_path_whatever_the_number_of_components():
+    """The smear path is the pooled pathway's method for a scalar series; an
+    event sample with one component takes the regression path, as event
+    samples with several do."""
+    from model_selection.selection import build_tier
+    from model_selection.selection.config import SelectionConfig
+    assert build_tier("nonlinear", SelectionConfig(), events=True).test.uncensored_feature_means == "regression"
+    assert build_tier("nonlinear", SelectionConfig()).test.uncensored_feature_means == "smear"
+
+
+def test_adequacy_draws_on_clusters_recompute_the_whole_statistic():
+    """On independent units the RESET draws are recomputed whole, with their
+    own denominators (adequacy.base): _statistic_parts serves only the
+    regular-grid path, so it is never called."""
+    calls = []
+
+    class Recording(LinearityTest):
+        def _statistic_parts(self, candidate, obs, conditioning):
+            calls.append(1)
+            return super()._statistic_parts(candidate, obs, conditioning)
+
+    rng = np.random.default_rng(4)
+    labels = np.repeat(np.arange(15), 3)
+    pos, lag = cluster_coordinates(labels)
+    c, z = rng.normal(size=labels.size), rng.normal(size=(labels.size, 1))
+    Recording().run(c, c + rng.normal(size=labels.size), z, time_positions=pos, min_temporal_lag=lag,
+                    n_permutations=49, rng=rng)
+    assert calls == []
+
+
+def test_power_reports_nothing_detectable_without_degrees_of_freedom():
+    from model_selection.statistics.power import minimum_detectable_r2
+    assert minimum_detectable_r2(200, 3, 3, 1, 0.05, nu=0.0) == 1.0
+    assert minimum_detectable_r2(200, 3, 3, 1, 0.05, nu=-2.0) == 1.0
+    assert minimum_detectable_r2(200, 3, 3, 1, 0.05, nu=5.0) < 1.0
+
+
+def test_unrestricted_width_is_not_widened_by_a_strong_effect():
+    """On clusters of events the restricted residuals carry the candidate's
+    effect into every draw and widen the null; the unrestricted residuals do
+    not, so the effective sample size from them is about the same with or
+    without the effect (LinearResidualTest.unrestricted_width_draws)."""
+    from model_selection.statistics.power import effective_sample_size
+    rng = np.random.default_rng(5)
+    labels = np.repeat(np.arange(60), rng.integers(1, 4, size=60))
+    pos, lag = cluster_coordinates(labels)
+    n = labels.size
+    z, c = rng.normal(size=(n, 2)), rng.normal(size=(n, 2))
+    test = LinearResidualTest()
+    n_eff = {}
+    for label, o in (("none", rng.normal(size=(n, 2))), ("strong", 2.5 * c + rng.normal(size=(n, 2)))):
+        r = test.run({"c": c}, o, z, 199, rng, pos, lag)
+        n_eff[label, "restricted"] = effective_sample_size(n, r.width_draws(0), 2, 2, 2)
+        n_eff[label, "unrestricted"] = effective_sample_size(
+            n, test.unrestricted_width_draws(c, o, z, 199, rng, pos, lag), 2, 2, 2)
+    assert abs(n_eff["none", "unrestricted"] / n_eff["none", "restricted"] - 1) < 0.25
+    assert n_eff["strong", "restricted"] < 0.8 * n_eff["strong", "unrestricted"]
+    assert abs(n_eff["strong", "unrestricted"] / n_eff["none", "unrestricted"] - 1) < 0.25

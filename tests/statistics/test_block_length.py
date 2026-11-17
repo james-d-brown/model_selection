@@ -189,17 +189,20 @@ def test_uneven_samples_keep_the_callers_lag():
     resolved = resolve_block(events, 37, [(a, b)])
     assert resolved.length == 37 and not resolved.estimated
     assert is_evenly_spaced(np.arange(500))
-    assert resolve_block(np.arange(500), 37, [(a, b)]).length == product_block_length(a, b)
+    assert resolve_block(np.arange(500), 37, [(a, b)]).estimated
 
 
-def test_resolved_block_combines_products_conservatively(monkeypatch):
-    # One resampling serves every product series: the longest block, the
-    # longest decorrelation lag, and non-decay if any series fails to decay.
-    from model_selection.statistics.significance import block_length as bl
-    estimates = [bl.DependenceEstimate(10, 30, True, 100), bl.DependenceEstimate(40, 20, False, 100)]
-    monkeypatch.setattr(bl, "product_dependence", lambda *args: estimates)
-    resolved = bl.resolve_block(np.arange(400), 0, [(None, None)])
-    assert (resolved.length, resolved.decorrelation_lag, resolved.decays) == (30, 40, False)
+def test_resolved_block_serves_every_candidate_with_the_longest_bandwidth():
+    # One set of multipliers serves every candidate: the longest bandwidth, the
+    # longest decorrelation lag, and non-decay if any factor fails to decay.
+    rng = np.random.default_rng(31)
+    t = np.arange(4000)
+    quick = (ar1(4000, 3, rng), ar1(4000, 3, rng))
+    slow = (ar1(4000, 40, rng), ar1(4000, 40, rng))
+    alone = resolve_block(t, 0, [slow])
+    both = resolve_block(t, 0, [quick, slow])
+    assert both.length == alone.length > resolve_block(t, 0, [quick]).length
+    assert both.decorrelation_lag == alone.decorrelation_lag
 
 
 def test_long_blocks_are_never_replaced_by_a_free_permutation():
@@ -313,7 +316,7 @@ def test_strided_subsample_block_length_is_counted_in_strides_and_returned_in_ti
     positions = np.arange(4000) * stride
     resolved = resolve_block(positions, 0, [(x, y)])
     assert resolved.estimated
-    assert resolved.length == product_block_length(x, y) * stride
+    assert resolved.length == resolve_block(np.arange(4000), 0, [(x, y)]).length * stride
 
 
 def test_independent_strided_subsample_has_a_one_step_decorrelation_lag_and_short_blocks():
@@ -431,3 +434,100 @@ def test_event_samples_record_their_span_in_blocks_of_the_callers_lag():
     assert not resolved.estimated and resolved.n_blocks == 7310 / 730 and resolved.few_blocks
     assert resolved.to_record()["n_blocks"] == resolved.n_blocks
     assert resolve_block(events, 0, [(np.arange(6.0), np.arange(6.0))]).n_blocks is None  # independent
+
+
+
+# --- The multipliers' bandwidth for testing --------------------------------
+
+def test_the_non_increasing_fit_pools_adjacent_violators():
+    from model_selection.statistics.significance.block_length import _non_increasing_fit
+    assert np.allclose(_non_increasing_fit([3.0, 1.0, 2.0]), [3.0, 1.5, 1.5])
+    assert np.allclose(_non_increasing_fit([1.0, 2.0, 3.0]), [2.0, 2.0, 2.0])
+    y = np.array([5.0, 4.0, 4.0, 1.0])
+    assert np.allclose(_non_increasing_fit(y), y)
+
+
+def test_independent_terms_have_zero_persistence_and_independent_multipliers():
+    rng = np.random.default_rng(32)
+    resolved = resolve_block(np.arange(5000), 0, [(rng.standard_normal(5000), rng.standard_normal(5000))])
+    assert resolved.persistence == 0.0 and resolved.length == 1
+
+
+def test_the_persistence_of_products_of_two_autoregressions_is_recovered():
+    """For independent AR(1) series with coefficients r1 and r2, the products
+    are autocorrelated as (r1 r2)^k, whose persistence a = G / J is
+    2 r / (1 - r^2), r = r1 r2. The window stops where the factors become
+    insignificant, which leaves out a little of the tail."""
+    from model_selection.statistics.significance.block_length import testing_bandwidth
+    rng = np.random.default_rng(33)
+    n, r1, r2 = 100000, 0.98, 0.95
+    x = np.empty(n); y = np.empty(n)
+    ex, ey = rng.standard_normal(n), rng.standard_normal(n)
+    x[0], y[0] = ex[0], ey[0]
+    for t in range(1, n):
+        x[t] = r1 * x[t - 1] + ex[t]
+        y[t] = r2 * y[t - 1] + ey[t]
+    r = r1 * r2
+    truth = 2 * r / (1 - r * r)
+    resolved = resolve_block(np.arange(n), 0, [(x, y)])
+    assert 0.75 * truth < resolved.persistence < 1.1 * truth
+    assert resolved.length == testing_bandwidth(resolved.persistence, n)
+
+
+def test_a_weak_slow_tail_in_the_products_is_kept():
+    """Each factor has a fast component and a weak slow one. The products'
+    tail lies below the per-lag significance band, but the factors' own
+    autocorrelations reach well past it, so the window keeps the tail and
+    the persistence is close to its value from the known autocorrelation."""
+    rng = np.random.default_rng(34)
+    n = 200000
+
+    def series():
+        e1, e2 = rng.standard_normal(n), rng.standard_normal(n)
+        fast, slow = np.empty(n), np.empty(n)
+        fast[0], slow[0] = e1[0], e2[0]
+        for t in range(1, n):
+            fast[t] = 0.9 * fast[t - 1] + e1[t]
+            slow[t] = 0.998 * slow[t - 1] + 0.06 * e2[t]
+        return fast + slow
+
+    x, y = series(), series()
+    # Known autocorrelation of each factor and of their products.
+    k = np.arange(20000)
+    var_f, var_s = 1 / (1 - 0.81), 0.0036 / (1 - 0.998 ** 2)
+    rho = (var_f * 0.9 ** k + var_s * 0.998 ** k) / (var_f + var_s)
+    prod = rho ** 2
+    truth = 2 * np.sum(k[1:] * prod[1:]) / (1 + 2 * np.sum(prod[1:]))
+    resolved = resolve_block(np.arange(n), 0, [(x, y)])
+    assert 0.5 * truth < resolved.persistence < 1.5 * truth
+
+
+def test_window_extends_to_the_products_own_lag_for_lagged_dependence():
+    """H0 concerns matched time steps. A white candidate c and o_t = c_{t-1} +
+    c_{t+1} are uncorrelated at lag 0, but their products are autocorrelated
+    at lag 1 (the cross-covariances at +1 and -1). The factors' window is empty;
+    the products' own lag (Bartlett band) extends it, so the bandwidth exceeds 1."""
+    from model_selection.statistics.significance.block_length import resolve_block
+    rng = np.random.default_rng(0)
+    n = 4000
+    x = rng.gamma(0.6, 1.0, size=n + 2) - 0.6
+    c, o = x[1:-1], x[:-2] + x[2:]
+    r = resolve_block(np.arange(n, dtype=float), 1, [(c, o)], grid_step=1.0)
+    rec = r.to_record()
+    assert rec["factor_window"] == 0 and rec["window_extended_by_products"]
+    assert r.length > 1
+
+
+def test_window_not_extended_for_series_independent_at_every_lag():
+    """Two independent, persistent series: the products have no autocorrelation
+    beyond the factors' window, and the Bartlett band does not extend it."""
+    from model_selection.statistics.significance.block_length import resolve_block
+    rng = np.random.default_rng(1)
+    n = 16000
+    extended = 0
+    for _ in range(10):
+        e1, e2 = rng.normal(size=n), rng.normal(size=n)
+        c, o = lfilter([1.0], [1.0, -0.99], e1), lfilter([1.0], [1.0, -0.98], e2)
+        rec = resolve_block(np.arange(n, dtype=float), 1, [(c - c.mean(), o - o.mean())], grid_step=1.0).to_record()
+        extended += bool(rec["window_extended_by_products"])
+    assert extended == 0

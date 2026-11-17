@@ -42,9 +42,9 @@ def _censored_sample(names=("a", "b", "c"), q=0.8, seed=0):
     obs_thr = c.threshold(obs_unc)
     conditioning = {nm: rng.normal(size=N) for nm in names}       # distinct from the candidates' values
     phase = rng.normal(size=(N, 2))
-    return SelectionSample({nm: c.apply(v, thr[nm]) for nm, v in unc.items()}, c.apply(obs_unc, obs_thr),
-                           np.arange(N), 0, covariates=phase, conditioning=conditioning,
-                           censored=CensoredSeries(unc, thr, obs_thr))
+    cs = CensoredSeries(unc, thr, obs_thr, obs_unc)
+    return SelectionSample(cs.censored_candidates(), cs.censored_obs(),
+                           np.arange(N), 0, covariates=phase, conditioning=conditioning, censored=cs)
 
 
 def test_without_separate_conditioning_values_the_candidates_condition():
@@ -137,10 +137,10 @@ def test_comparisons_with_other_candidates_condition_on_uncensored_values(monkey
 
     def fake_adds(tier, name, values, obs, z, *args, **kwargs):
         calls.append((name, np.array(values), np.array(z)))
-        return {"p_value": 1.0, "effect": float("nan"), "adds": False, "detectable_r2": 1.0}
+        return {"p_value": 1.0, "effect": float("nan"), "adds": False, "untestable": False}
 
     monkeypatch.setattr(eq, "_adds", fake_adds)
-    eq.information_equivalence(selection, s, tier, 99, 0.05, np.random.default_rng(5), margin=0.02)
+    eq.information_equivalence(selection, s, tier, 99, 0.05, np.random.default_rng(5))
     for name, values, z in calls:
         assert np.array_equal(values, s.candidates[name])                 # tested censored
         other = "a" if name != "a" else None

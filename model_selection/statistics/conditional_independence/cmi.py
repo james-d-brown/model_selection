@@ -26,9 +26,11 @@ inconsistent (Gao et al., 2017). The local permutation's neighbour search in
 Z uses the ranks of Z, as in Runge (2018), tied values sharing their average
 rank: it counts nothing at a boundary distance, so rank ties there only
 leave the order among equidistant neighbours arbitrary.
-With Z empty, a time-block permutation is used, with the Politis–White
-block length for the products of the candidate and the observations on
-evenly spaced samples. The local permutation treats samples as exchangeable;
+With Z empty, a time-block permutation is used, with blocks as long as the
+dependence of the products of the candidate and the observations on evenly
+spaced samples: the shorter of the two series' decorrelation lags
+(significance.block_length), beyond which the products' autocovariance
+vanishes under the null. The local permutation treats samples as exchangeable;
 on evenly spaced samples, whether they are indistinguishable from independent
 sampling is estimated and recorded. The neighbour structure
 depends only on Z, so all candidates share each permutation.
@@ -125,7 +127,15 @@ class CMITest(ConditionalIndependenceTest):
         if conditioning is None:
             resolved = resolve_block(time_positions, dependence_lag,
                                      [(candidates[nm], obs) for nm in names], self.run_length, grid_step)
-            block, dependence = resolved.length, resolved.to_record()
+            # Blocks as long as the products' dependence, the lag beyond which it
+            # vanishes under the null (the shorter factor's decorrelation lag),
+            # so that whole blocks exchanged are independent. The multipliers'
+            # testing bandwidth (resolved.length) sets a variance estimate's
+            # weights, not the extent of the dependence, and is not used here.
+            block = resolved.decorrelation_lag if resolved.estimated else resolved.length
+            # A permutation of G units reaches p-values down to 1 / G!, not the
+            # sign-flip floor 2^(1 - G) of the multiplier tests.
+            dependence = {**resolved.to_record(), "block_length": block, "smallest_p_value": None}
         else:
             dependence = samples_independent(time_positions, [obs] + [candidates[nm] for nm in names],
                                              self.run_length, grid_step)

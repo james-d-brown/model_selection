@@ -31,6 +31,7 @@ from model_selection.statistics.adequacy.kernels import (
 from model_selection.statistics.association.canonical import residualize_on_conditioning
 from model_selection.statistics.regression.linear import ols_fit
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH
+from model_selection.statistics.significance.clusters import orthonormal_residual_maker
 from model_selection.utils import as2d
 
 
@@ -104,6 +105,28 @@ def reset_statistic(x_resid: np.ndarray, y_resid: np.ndarray, powers: tuple[int,
     return max(f_stat, 0.0), df_num, df_den, partial_r2, semipartial_r2
 
 
+def reset_parts(x_resid: np.ndarray, y_resid: np.ndarray, powers: tuple[int, ...] = (2, 3)
+                ) -> tuple[float, float, float, float]:
+    """reset_statistic's F and semipartial R^2 as (numerator, denominator,
+    semipartial numerator, semipartial denominator): F = (delta RSS / df_num)
+    / (RSS_augmented / df_den), semipartial = delta RSS / TSS. A zero
+    denominator stands for a statistic of zero."""
+    x_resid = np.asarray(x_resid, dtype=np.float64).ravel()
+    y_resid = np.asarray(y_resid, dtype=np.float64).ravel()
+    n = x_resid.shape[0]
+    design_restricted = np.column_stack([np.ones(n), x_resid])
+    fitted_r = design_restricted @ np.linalg.lstsq(design_restricted, y_resid, rcond=None)[0]
+    rss_restricted = float(np.sum((y_resid - fitted_r) ** 2))
+    design_augmented = np.column_stack([design_restricted] + [fitted_r ** p for p in powers])
+    fitted_a = design_augmented @ np.linalg.lstsq(design_augmented, y_resid, rcond=None)[0]
+    rss_augmented = float(np.sum((y_resid - fitted_a) ** 2))
+    df_den = n - design_augmented.shape[1]
+    delta_rss = max(rss_restricted - rss_augmented, 0.0)
+    tss = float(np.sum((y_resid - y_resid.mean()) ** 2))
+    denominator = rss_augmented / df_den if df_den > 0 and rss_augmented > 0 else 0.0
+    return delta_rss / len(powers), denominator, delta_rss, tss
+
+
 class LinearityTest(FunctionalFormTest):
     """RESET-on-residuals test of whether partial correlation adequately
     summarizes the candidate-obs relationship given the conditioning set.
@@ -123,6 +146,25 @@ class LinearityTest(FunctionalFormTest):
         obs_resid = ols_residuals(obs, conditioning)
         return reset_statistic(candidate_resid, obs_resid)
 
+    def _statistic_parts(self, candidate, obs, conditioning):
+        """The F statistic's numerator and denominator (reset_parts), so that
+        the draws keep the observed residual variance (base module)."""
+        return reset_parts(ols_residuals(candidate, conditioning), ols_residuals(obs, conditioning))
+
+    def _score_terms(self, candidate, obs, conditioning, resid_null):
+        """The null model's residuals times each tested regressor: the squared
+        and cubed fitted values of the residual regression, with the null
+        model's regressors (an intercept and the candidate's residual)
+        removed from them. The F statistic's numerator is a quadratic form in
+        the sums of these products."""
+        x = ols_residuals(candidate, conditioning)
+        y = ols_residuals(obs, conditioning)
+        design = np.column_stack([np.ones(x.shape[0]), x])
+        fitted = design @ np.linalg.lstsq(design, y, rcond=None)[0]
+        powers = np.column_stack([fitted ** 2, fitted ** 3])
+        tested = powers - design @ np.linalg.lstsq(design, powers, rcond=None)[0]
+        return [(resid_null, tested)]
+
     def _null_fit(self, candidate, obs, conditioning):
         """Null model: obs linear in the conditioning set and the candidate."""
         regressors = as2d(candidate)
@@ -136,13 +178,24 @@ class LinearityTest(FunctionalFormTest):
             regressors = np.column_stack([regressors, as2d(conditioning)])
         return _ols_leverage(regressors)
 
+    def _null_residual_maker(self, candidate, obs, conditioning):
+        """I - P for the null model's least squares (an intercept, the
+        candidate and the conditioning set), for the cluster-level scaling on
+        independent units (adequacy.base)."""
+        regressors = as2d(candidate)
+        if conditioning is not None and np.asarray(conditioning).size:
+            regressors = np.column_stack([regressors, as2d(conditioning)])
+        return orthonormal_residual_maker(np.column_stack([np.ones(regressors.shape[0]), regressors]))
+
 
 class MultivariateLinearityTest(FunctionalFormTest):
     """Kernel score test of whether a linear (CCA-type) relationship between
     multivariate candidate and obs is adequate given the conditioning set.
 
-    The ridge penalty defaults to a REML estimate on the linear kernel at every
-    permutation draw. Effect sizes come from an augmented fit with
+    The ridge penalty defaults to a REML estimate on the linear kernel,
+    estimated once on the observed data and held fixed in every draw, as
+    kernel-machine score tests condition on the fitted null model (Lin, 1997;
+    Wu et al., 2011; as StateIndependenceTest does). Effect sizes come from an augmented fit with
     K_lin + K_rbf at the same penalty. classical_p_value is NaN (Davies'
     method is not implemented); decisions use the permutation p-value.
     """
@@ -171,9 +224,7 @@ class MultivariateLinearityTest(FunctionalFormTest):
         bw = median_heuristic_bandwidth(candidate_resid)
         K_nonlinear = rbf_kernel(candidate_resid, bw)
 
-        ridge_lambda = self.ridge_lambda
-        if ridge_lambda is None:
-            ridge_lambda = reml_kernel_ridge_lambda(K_linear, obs_resid)
+        ridge_lambda = self._penalty(K_linear, obs_resid)
 
         _, resid_null = kernel_ridge_fit(K_linear, obs_resid, ridge_lambda)
 
@@ -186,6 +237,15 @@ class MultivariateLinearityTest(FunctionalFormTest):
 
         return score, 1, 1, partial_es, semipartial_es  # degrees of freedom unused
 
+    def _score_terms(self, candidate, obs, conditioning, resid_null):
+        """Each column of the null residuals r with the same column of K r,
+        K the radial basis function kernel on the candidate's residuals: the
+        score is the sum over samples and columns of r_t (K r)_t."""
+        candidate_resid = residualize_on_conditioning(candidate, conditioning)
+        r = as2d(resid_null)
+        smooth = rbf_kernel(candidate_resid, median_heuristic_bandwidth(candidate_resid)) @ r
+        return [(r[:, j], smooth[:, j]) for j in range(r.shape[1])]
+
     def _null_fit(self, candidate, obs, conditioning):
         """Null model: obs linear in the conditioning set, plus a ridge fit
         with the linear kernel on the candidate's residuals."""
@@ -193,11 +253,44 @@ class MultivariateLinearityTest(FunctionalFormTest):
         obs_2d = as2d(obs)
         obs_resid = residualize_on_conditioning(obs_2d, conditioning)
         K_linear = candidate_resid @ candidate_resid.T
-        ridge_lambda = self.ridge_lambda
-        if ridge_lambda is None:
-            ridge_lambda = reml_kernel_ridge_lambda(K_linear, obs_resid)
-        _, resid_null = kernel_ridge_fit(K_linear, obs_resid, ridge_lambda)
+        _, resid_null = kernel_ridge_fit(K_linear, obs_resid, self._penalty(K_linear, obs_resid))
         return (obs_2d - resid_null).reshape(obs.shape)
+
+    def _null_residual_maker(self, candidate, obs, conditioning):
+        """(I - H)(I - P_Z) for the null fit: least squares on an intercept and
+        the conditioning set, then ridge with the linear kernel on the
+        candidate's residuals at the penalty held for this test, for the
+        cluster-level scaling on independent units (adequacy.base)."""
+        candidate_resid = residualize_on_conditioning(candidate, conditioning)
+        obs_resid = residualize_on_conditioning(as2d(obs), conditioning)
+        n = candidate_resid.shape[0]
+        Z = np.ones((n, 1)) if conditioning is None or np.asarray(conditioning).size == 0 else \
+            np.column_stack([np.ones(n), as2d(conditioning)])
+        M = orthonormal_residual_maker(Z)
+        K_linear = candidate_resid @ candidate_resid.T
+        lam = self._penalty(K_linear, obs_resid)
+        H = K_linear @ np.linalg.solve(K_linear + lam * np.eye(n), np.eye(n))
+        return (np.eye(n) - H) @ M
+
+    def _penalty(self, K_linear, obs_resid) -> float:
+        """The configured ridge_lambda, else the REML estimate fixed for the
+        current test (run), else REML on these data."""
+        if self.ridge_lambda is not None:
+            return self.ridge_lambda
+        fixed = self.__dict__.get("_fixed_lambda")
+        return fixed if fixed is not None else reml_kernel_ridge_lambda(K_linear, obs_resid)
+
+    def run(self, candidate, obs, conditioning, *args, **kwargs):
+        """FunctionalFormTest.run with the REML penalty estimated once, on the
+        observed data, and held fixed in every draw (class docstring)."""
+        try:
+            if self.ridge_lambda is None:
+                c = residualize_on_conditioning(np.asarray(candidate, dtype=float), conditioning)
+                o = residualize_on_conditioning(as2d(np.asarray(obs, dtype=float)), conditioning)
+                self.__dict__["_fixed_lambda"] = reml_kernel_ridge_lambda(c @ c.T, o)
+            return super().run(candidate, obs, conditioning, *args, **kwargs)
+        finally:
+            self.__dict__.pop("_fixed_lambda", None)
 
 
 

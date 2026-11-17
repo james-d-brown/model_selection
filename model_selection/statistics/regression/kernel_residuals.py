@@ -169,6 +169,28 @@ def kernel_factor(K: np.ndarray) -> np.ndarray:
     return V[:, keep] * np.sqrt(e[keep])
 
 
+def _feature_bandwidth(Xs: np.ndarray) -> float:
+    """The feature kernel's bandwidth for standardized X, as used by
+    feature_factor_with_cap."""
+    return _median_bandwidth(Xs) if _use_low_rank(Xs.shape[0]) else median_heuristic_bandwidth(Xs)
+
+
+def feature_kernel_at(X: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """k(v, x_j): the feature kernel of X (feature_factor_with_cap) between
+    each of `values` and each sample of X, for a variable with one column.
+    With the factor L of X's kernel, k(v, X) L (L'L)^-1 is the feature map at
+    v (the Nystrom extension), which is L's row at a sample value."""
+    x = as2d(np.asarray(X, dtype=float))
+    if x.shape[1] != 1:
+        raise ValueError("feature_kernel_at supports variables with one column")
+    x = x[:, 0]
+    m, sd = x.mean(), x.std()
+    sd = sd if sd > 0 else 1.0
+    xs, vs = (x - m) / sd, (np.asarray(values, dtype=float).ravel() - m) / sd
+    bw = _feature_bandwidth(xs[:, None])
+    return vs[:, None] * xs[None, :] + np.exp(-(vs[:, None] - xs[None, :]) ** 2 / (2.0 * bw ** 2))
+
+
 def feature_factor_with_cap(X: np.ndarray) -> tuple[np.ndarray, float]:
     """(factor L of the feature kernel of X, cap share): exact up to the rank
     cap's sample size, pivoted Cholesky beyond it."""
@@ -179,6 +201,36 @@ def feature_factor_with_cap(X: np.ndarray) -> tuple[np.ndarray, float]:
     sq = (Xs ** 2).sum(1)
     rbf = _rbf_column(Xs, sq, bw)
     return pivoted_cholesky(sq + 1.0, lambda p: Xs @ Xs[p] + rbf(p), _LOW_RANK, kind="features")
+
+
+def feature_factor_split(X: np.ndarray, min_share: float = 0.01) -> tuple[np.ndarray, float, list]:
+    """(factor, cap share, column groups) of the same feature kernel as
+    feature_factor_with_cap, arranged so that its columns can be tuned
+    separately: the standardized variable's own columns first, then the
+    radial basis function kernel's factor rotated to its principal axes
+    (the centred factor's singular vectors, largest first). The kernel, and
+    so any statistic of its inner products, is unchanged. Groups: each own
+    column alone, each principal column holding at least `min_share` of the
+    factor's total variance alone, the remaining columns together."""
+    Xs = standardize(X)
+    n, d = Xs.shape
+    bw = _feature_bandwidth(Xs)
+    sq = (Xs ** 2).sum(1)
+    if not _use_low_rank(n):
+        R, cap = kernel_factor(np.exp(-_sq_dists(Xs, Xs) / (2.0 * bw ** 2))), 0.0
+    else:
+        R, cap = pivoted_cholesky(np.ones(n), _rbf_column(Xs, sq, bw), _LOW_RANK, kind="features")
+    Rc = R - R.mean(axis=0)
+    _, sv, Vt = np.linalg.svd(Rc, full_matrices=False)
+    R = R @ Vt.T
+    L = np.column_stack([Xs, R])
+    var = np.concatenate([Xs.var(axis=0) * n, sv ** 2])
+    share = var / var.sum()
+    groups = [[j] for j in range(d)]
+    big = [d + j for j in range(R.shape[1]) if share[d + j] >= min_share]
+    rest = [d + j for j in range(R.shape[1]) if share[d + j] < min_share]
+    groups += [[j] for j in big] + ([rest] if rest else [])
+    return L, cap, groups
 
 
 def feature_factor(X: np.ndarray) -> np.ndarray:
@@ -399,6 +451,22 @@ class ConditioningRegression:
                 self.rank_change = max(self.rank_change, change)
         return b, lam, resid
 
+    def residual_operator(self, target: np.ndarray):
+        """The cross-fitted residual maker with the bandwidth and penalty
+        chosen for `target` (as residuals() chooses them), as a function of
+        other targets of any number of columns: at a fixed bandwidth and
+        penalty the cross-fitted residuals are linear in the target, so many
+        targets can be residualized in one pass."""
+        T = as2d(np.asarray(target, dtype=float))
+        b, lam, _ = self._fit(T, T.shape[1])
+        s, U, _, folds, _ = self.spectra[b]
+
+        def apply(Y: np.ndarray) -> np.ndarray:
+            Yc = as2d(np.asarray(Y, dtype=float))
+            Yc = Yc - Yc.mean(axis=0)
+            return self._residuals_at(self._fold_terms(Yc, s, U, folds, self.n), lam, Yc.shape)
+        return apply
+
     def effective_df(self, target: np.ndarray) -> float:
         """Effective degrees of freedom of the fit to `target`, excluding the
         intercept: the trace of its centred smoother matrix on all samples
@@ -408,6 +476,27 @@ class ConditioningRegression:
         b, lam, _ = self._fit(T, T.shape[1])
         s = self.spectra[b][0]
         return float(np.sum(s / (s + lam)))
+
+    def residuals_by_group(self, target: np.ndarray, groups: list) -> np.ndarray:
+        """Cross-fitted residuals of `target` (n, r), each group of its
+        columns with its own bandwidth and penalty, chosen to minimize the
+        blocked cross-validation error summed over that group's columns."""
+        T = as2d(np.asarray(target, dtype=float))
+        Yc = T - T.mean(axis=0)
+        err = np.zeros((len(self.spectra), len(RIDGE_PENALTIES), Yc.shape[1]))
+        for b, (s, U, _, folds, _) in enumerate(self.spectra):
+            for pred, _, g, Q, a, e in self._fold_terms(Yc, s, U, folds, self.n):
+                for j, lam in enumerate(RIDGE_PENALTIES):
+                    err[b, j] += np.sum((a - Q @ (g / (e + lam)[:, None])) ** 2, axis=0)
+        resid = np.empty_like(Yc)
+        for cols in groups:
+            cols = list(cols)
+            total = err[:, :, cols].sum(axis=2)
+            b, j = np.unravel_index(int(np.argmin(total)), total.shape)
+            s, U, _, folds, _ = self.spectra[b]
+            resid[:, cols] = self._residuals_at(self._fold_terms(Yc[:, cols], s, U, folds, self.n),
+                                                RIDGE_PENALTIES[j], (Yc.shape[0], len(cols)))
+        return resid
 
     def residuals(self, target: np.ndarray, extra: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None]:
         """Cross-fitted residuals of `target` (n, r) and, with the same

@@ -52,11 +52,11 @@ class SelectionConfig:
     min_temporal_lag : dependence lag in timesteps; None estimates it
         obs-free as the largest Politis decorrelation lag of the
         formulations. Resampling of samples on a regular time grid uses a
-        Politis–White block length estimated within each test instead
-        (docs/methods.md, Dependence between samples).
+        bandwidth estimated within each test instead (docs/methods.md,
+        Dependence between samples).
     dependence_run_length : number of consecutive statistically insignificant
-        autocorrelations that ends the search for the decorrelation lag in
-        the Politis–White estimate. Default 5, as Politis and White (2004,
+        autocorrelations that ends the search for a decorrelation lag
+        (Politis, 2003). Default 5, as Politis and White (2004,
         Remark 2.3) suggest; it guards against isolated insignificant values,
         not against cycles, and is counted in samples, so its duration in
         time depends on the sampling interval (docs/methods.md, Dependence
@@ -84,22 +84,20 @@ class SelectionConfig:
         candidate must account for to be worth selecting. With one feature it
         is the fraction by which adding the candidate would reduce the
         unexplained variance (R^2 = 0.2 reduces it by 20%, the RMSE by about
-        11%). Every result reports the smallest contribution the data can
-        detect with 80% power; when meaningful_r2 is set and that is larger,
-        the result is flagged as unable to resolve contributions at the
-        meaningful level. Selection is never stopped by it. When set, it is
-        also the cascade's escalation floor (AdequacyConfig.effect_size_floor). See
-        docs/methods.md, Detectable effect and the meaningful-effect threshold.
+        11%). Selection is never stopped by it. When set, it is the cascade's
+        escalation floor for the candidate linearity and effect-modification
+        tests (AdequacyConfig.effect_size_floor). See docs/methods.md, Step
+        outcomes and the meaningful-effect threshold.
     cmi_calibration : check the CMI tier's calibration on surrogate
         candidates before it accepts a candidate or the cascade escalates to
         it. On by default in both pathways; turning it off saves
         computation (52 surrogate tests per use at alpha = 0.05), and a CMI
         selection made without it is flagged for review.
     equivalence_checks : after selection, compare each selected formulation
-        with every other candidate in both directions, to report which are
-        interchangeable with it (docs/methods.md, Interchangeable
-        formulations). Reported only; costs two tests per candidate per
-        accepted round.
+        with every other candidate in both directions, and report the class
+        of every formulation: distinct, exchangeable, redundant or not tested
+        (docs/methods.md, Interchangeable formulations). Reported only; costs
+        two tests per candidate per accepted round.
     cmi_calibration_rate_ratio : the CMI tier's calibration on surrogate
         candidates uses as many surrogates as needed to detect, with 80%
         power, a false-acceptance rate this many times alpha
@@ -178,7 +176,9 @@ class AdequacyConfig:
         triggers escalation, as the share of the observations' variation left
         unexplained by the selected formulations that the simpler tier would
         miss (0.02 = 2%). None (default) uses SelectionConfig.meaningful_r2
-        when that is set, and 0.02 otherwise. See docs/methods.md, Selection.
+        when that is set, and 0.02 otherwise. The linear adjustment test,
+        which concerns validity, uses the smaller of this and the acceptance
+        floor (resolved_adjustment_floor). See docs/methods.md, Selection.
     n_permutations : resamples per adequacy test; None (default) derives it
         from alpha so that the Monte Carlo standard error of the p-value at
         the threshold is at most monte_carlo_relative_error times alpha
@@ -212,6 +212,16 @@ class AdequacyConfig:
         if selection.meaningful_r2 is not None:
             return selection.meaningful_r2
         return DEFAULT_ADEQUACY_FLOOR
+
+    def resolved_adjustment_floor(self, selection: "SelectionConfig") -> float:
+        """Floor of the linear adjustment test, the one escalation test that
+        concerns validity: the smaller of the escalation floor and the
+        acceptance floor. With either regression's nonlinear share below the
+        acceptance floor, a spurious contribution cannot reach that floor
+        (the Cauchy-Schwarz inequality; docs/methods.md, Escalation tests),
+        so this test's floor must not exceed it, whatever the escalation
+        floor of the tests that concern power."""
+        return min(self.resolved_effect_size_floor(selection), selection.effect_size_floor)
 
     @property
     def resolved_n_permutations(self) -> int:

@@ -77,9 +77,8 @@ def _censored_series(basin: BasinData, rows: np.ndarray, censoring: Censoring):
     obs_uncensored = prepare_series(basin.obs.values.astype(float))[rows]
     thresholds = {name: censoring.threshold(v) for name, v in uncensored.items()}
     obs_threshold = censoring.threshold(obs_uncensored)
-    candidates = {name: Censoring.apply(v, thresholds[name]) for name, v in uncensored.items()}
-    obs = Censoring.apply(obs_uncensored, obs_threshold)
-    return candidates, obs, CensoredSeries(uncensored, thresholds, obs_threshold)
+    censored = CensoredSeries(uncensored, thresholds, obs_threshold, obs_uncensored)
+    return censored.censored_candidates(), censored.censored_obs(), censored
 
 
 def run_pooled_analysis(

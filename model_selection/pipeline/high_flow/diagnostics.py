@@ -129,11 +129,15 @@ def basis_sensitivity_check(
                                rng, time_positions, dependence_lag)
         w = result.index(result.winner)
         effect, _ = tier.test.magnitude(candidate_events[result.winner], obs_features, z, time_positions,
-                                        dependence_lag, float(result.observed[w]), result.null[:, w])
+                                        dependence_lag, float(result.observed[w]), result.width_draws(w))
         accepted, p_value, bias_corrected = gate(float(result.observed[w]), result.null[:, w],
                                                  result.null.max(axis=1), level, tier.effect_size_floor,
                                                  effect=effect)
         obs_rows = table[table["series"] == OBS_KEY]
+        # With too few clusters of events no p-value below the level is attainable
+        # (significance.clusters): a basis that accepts nothing then shows nothing.
+        smallest = (result.dependence or {}).get("smallest_p_value")
+        accepted = bool(accepted and not (smallest is not None and smallest >= level))
         per_basis.append({
             "basis": basis,
             "winner": result.winner,
@@ -141,6 +145,7 @@ def basis_sensitivity_check(
             "p_value": p_value,
             "effect": bias_corrected,
             "accepted": accepted,
+            "untestable": bool(smallest is not None and smallest >= level),
             "obs_reconstruction_r2_median": float(obs_rows["reconstruction_r2"].median()) if len(obs_rows) else None,
         })
 
@@ -152,4 +157,5 @@ def basis_sensitivity_check(
         "obs_reconstruction_r2_median_shared_basis": obs_r2_pooled,
         "per_basis": per_basis,
         "requires_closer_inspection": any(b["accepted"] for b in per_basis),
+        "untestable_bases": [b["basis"] for b in per_basis if b["untestable"]],
     }

@@ -252,6 +252,17 @@ class StateIndependenceTest(FunctionalFormTest):
         )
         return score, 1, 1, partial_es, semipartial_es  # degrees of freedom unused
 
+    def _score_terms(self, candidate, obs, conditioning, resid_null):
+        """Each column of the null residuals r with the same column of
+        K_int r: the score is the sum over samples and columns of
+        r_t (K_int r)_t. Without a conditioning set the statistic is zero,
+        and the residuals stand for both factors."""
+        r = as2d(resid_null)
+        if conditioning is None or np.asarray(conditioning).size == 0:
+            return [(r[:, j], r[:, j]) for j in range(r.shape[1])]
+        smooth = self._spectra(candidate, conditioning)["apply_int"](r)
+        return [(r[:, j], smooth[:, j]) for j in range(r.shape[1])]
+
     def _null_fit(self, candidate, obs, conditioning):
         """Null model: additive kernel ridge of obs on the candidate and the
         conditioning set (K_c + K_z), with no interaction."""
@@ -281,6 +292,18 @@ class StateIndependenceTest(FunctionalFormTest):
         diag_hh = (V ** 2) @ (d ** 2)
         diag_rr = (1.0 - 1.0 / n) - 2.0 * (diag_h - h1 / n) + (diag_hh - h1 ** 2 / n)
         return 1.0 - diag_rr
+
+    def _null_residual_maker(self, candidate, obs, conditioning):
+        """R = (I - H)(I - 11'/n), the null fit's residual maker (centring,
+        then kernel ridge at the fixed penalty), for the cluster-level
+        scaling of the residuals on independent units (adequacy.base)."""
+        n = as2d(candidate).shape[0]
+        C = np.eye(n) - 1.0 / n
+        if conditioning is None or np.asarray(conditioning).size == 0:
+            return C
+        lam, _ = self._penalties(candidate, obs, conditioning)
+        e, V = self._spectra(candidate, conditioning)["main"][:2]
+        return C - V @ ((e / (e + lam))[:, None] * (V.T @ C))
 
     def run(
             self,

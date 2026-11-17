@@ -1412,3 +1412,108 @@ def test_kernel_escalation_tests_on_pivoted_cholesky_factors_match_the_exact_ker
         kr.set_low_rank(kr.DEFAULT_RANK_CAP)
     assert exact[0] == factored[0] and exact[2] == factored[2] and exact[3] == factored[3]
     assert np.allclose([exact[1], exact[4], exact[5]], [factored[1], factored[4], factored[5]], rtol=1e-6)
+
+
+def test_reset_parts_reproduce_the_statistic_and_its_semipartial_effect():
+    from model_selection.statistics.adequacy.linearity import reset_parts
+    rng = np.random.default_rng(5)
+    x = rng.normal(size=200)
+    y = x + 0.4 * x ** 2 + rng.normal(size=200)
+    F, _, _, _, semi = _reset_statistic(x, y)
+    num, den, semi_num, semi_den = reset_parts(x, y)
+    assert np.isclose(num / den, F) and np.isclose(semi_num / semi_den, semi)
+
+
+def test_linearity_test_draws_keep_the_observed_denominator():
+    """Each null draw of the RESET F is the draw's numerator over the observed
+    residual variance (adequacy.base): on samples off a grid (no fixed-b
+    division), the null's mean is the mean of the draws' numerators over the
+    observed denominator."""
+    from model_selection.statistics.adequacy.linearity import ols_residuals, reset_parts
+    numerators = []
+
+    class Recording(LinearityTest):
+        def _statistic_parts(self, candidate, obs, conditioning):
+            parts = super()._statistic_parts(candidate, obs, conditioning)
+            numerators.append(parts[0])
+            return parts
+
+    rng = np.random.default_rng(9)
+    n = 150
+    c, z = rng.normal(size=n), rng.normal(size=(n, 1))
+    o = 0.5 * c + z[:, 0] + rng.normal(size=n)
+    positions = np.cumsum(rng.integers(1, 5, size=n))      # irregular: not a grid
+    result = Recording().run(c, o, z, time_positions=positions, min_temporal_lag=0, n_permutations=199, rng=rng)
+    observed_den = reset_parts(ols_residuals(c, z), ols_residuals(o, z))[1]
+    assert len(numerators) == 200
+    assert np.isclose(result.null_mean, np.mean(numerators[1:]) / observed_den)
+
+
+def test_multivariate_linearity_test_fixes_its_penalty_on_the_observed_data(monkeypatch):
+    import model_selection.statistics.adequacy.linearity as lin
+    calls = []
+    original = lin.reml_kernel_ridge_lambda
+    monkeypatch.setattr(lin, "reml_kernel_ridge_lambda", lambda *a, **k: calls.append(1) or original(*a, **k))
+    rng = np.random.default_rng(2)
+    n = 80
+    c, o, z = rng.normal(size=(n, 2)), rng.normal(size=(n, 2)), rng.normal(size=(n, 1))
+    lin.MultivariateLinearityTest().run(c, o, z, n_permutations=49, rng=rng)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("test_class", [LinearityTest, StateIndependenceTest])
+def test_escalation_bandwidth_follows_the_statistic_terms_not_the_candidate(test_class):
+    """The multipliers' bandwidth is set from the statistic's own per-sample
+    terms (methods.md, Appendix C). Here the conditioning set absorbs the
+    candidate's large, fast part, so the candidate itself looks independent
+    while its residual on the conditioning set, from which every tested term
+    is built, is slow. A bandwidth from the candidate would be 1 step, and the
+    null far too narrow (in a check of 100 records, 92% and 56% of true nulls
+    rejected at 5%)."""
+    from scipy.signal import lfilter
+    rng = np.random.default_rng(3)
+    n = 2000
+
+    def ar(r):
+        e = rng.normal(size=n)
+        e[0] /= np.sqrt(1 - r * r)
+        return lfilter([1.0], [1.0, -r], e) * np.sqrt(1 - r * r)
+
+    z = rng.normal(size=(n, 1))
+    c = 5.0 * z[:, 0] + ar(0.995)
+    o = 0.5 * c - 2.5 * z[:, 0] + ar(0.995)
+    result = test_class().run(c, o, z, time_positions=np.arange(n, dtype=float), min_temporal_lag=1,
+                              n_permutations=19, rng=rng, grid_step=1.0)
+    assert result.block_length > 20
+
+
+def test_linear_adjustment_test_tests_each_side_at_alpha():
+    """Intersection-union (Berger, 1982): the test rejects only when both sides
+    depart, so each side is tested at alpha, divided only within the side. With
+    one side linear and the other strongly nonlinear it keeps the tier."""
+    from model_selection.statistics.adequacy.specification import linear_specification_test
+    rng = np.random.default_rng(4)
+    n = 400
+    z = rng.normal(size=(n, 1))
+    c = z[:, 0] + 0.5 * rng.normal(size=n)                       # linear in z
+    o = np.sin(3 * z[:, 0]) + 0.3 * rng.normal(size=n)           # strongly nonlinear in z
+    out = linear_specification_test(np.column_stack([c, o]), z, 0.05, 0.02, 199, rng, np.arange(n, dtype=float), 0,
+                                    n_candidate_columns=1)
+    assert out.dependence["level"] == pytest.approx(0.05)
+    assert out.tier_adequate
+
+
+def test_kernel_share_of_a_null_draw_counts_only_what_the_fit_explains():
+    """A null draw's share uses the observed residuals' sum of squares as its
+    denominator; variation the draw lacks must not count as explained (it did,
+    biasing the chance level of the linear adjustment test upward)."""
+    from model_selection.statistics.adequacy.specification import _kernel_scores
+    rng = np.random.default_rng(0)
+    V = np.linalg.qr(rng.normal(size=(50, 5)))[0]
+    eigvals = np.linspace(1.0, 0.1, 5)
+    r = rng.normal(size=(50, 1))
+    _, own = _kernel_scores(r, eigvals, V, 0.5)
+    _, same = _kernel_scores(r, eigvals, V, 0.5, total=float(r[:, 0] @ r[:, 0]))
+    assert same[0] == pytest.approx(own[0])
+    _, empty = _kernel_scores(np.zeros((50, 1)), eigvals, V, 0.5, total=1.0)
+    assert empty[0] == 0.0

@@ -32,7 +32,18 @@ Gupta, 2003). Autocorrelated samples carry less information than their
 number, and the test's resampled null, which reproduces that dependence, is
 wider than the independent one. Matching its mean gives the number of
 independent samples with the same null, which is used as N (the first-moment
-matching of Satterthwaite, 1946). For a single feature the test is the same
+matching of Satterthwaite, 1946); the mean is that of the multipliers'
+variance corrected for the bandwidth's bias (JointTestResult.width_draws).
+The null's width is itself estimated: from a record a few bandwidths long,
+or from few clusters of events, it has few degrees of freedom nu
+(JointTestResult.null_degrees_of_freedom): on a time grid from the fixed-b
+draws, for clusters of events the number of clusters less one. The power then uses min(v, nu) as the denominator
+degrees of freedom of the F distributions, the t or F reference with the
+variance estimate's degrees of freedom (Bester, Conley and Hansen, 2011;
+Lazarus et al., 2018), so that a test whose null is imprecise reports a
+larger detectable effect, and none is detectable when nu is zero or less.
+This is the power of a studentized test, a reference for the tiers'
+statistics. For a single feature the test is the same
 as Rao's F test, whose power is computed here; with several, Rao's test's
 power is used for Pillai's trace too (docs/methods.md, Detectable contribution and
 effective sample size).
@@ -65,14 +76,21 @@ def rao_degrees(n: float, k_y: int, k_x: int, k_c: int = 0) -> RaoDegrees:
     return RaoDegrees(u, v, s)
 
 
-def set_correlation_power(n: float, k_y: int, k_x: int, k_c: int, f2: float, alpha: float) -> float:
+def set_correlation_power(n: float, k_y: int, k_x: int, k_c: int, f2: float, alpha: float,
+                          nu: float | None = None) -> float:
     """Power of Rao's F test to detect a population effect f^2 at level alpha.
-    Returns 0 when the test is undefined (v <= 0)."""
+    nu, when given, is the degrees of freedom of the null's variance
+    estimate (JointTestResult.null_degrees_of_freedom): the denominator degrees of
+    freedom of the reference and noncentral F become min(v, nu), so that a
+    null whose width is itself uncertain gives the test less power, while the
+    noncentrality, the information in the n effective samples, is unchanged
+    (module docstring). Returns 0 when the test is undefined (v <= 0)."""
     d = rao_degrees(n, k_y, k_x, k_c)
-    if d.v <= 0:
+    if d.v <= 0 or (nu is not None and np.isfinite(nu) and nu <= 0):
         return 0.0
-    critical = stats.f.ppf(1.0 - alpha, d.u, d.v)
-    return float(stats.ncf.sf(critical, d.u, d.v, f2 * (d.u + d.v + 1.0)))
+    df = d.v if nu is None or not np.isfinite(nu) else min(d.v, float(nu))
+    critical = stats.f.ppf(1.0 - alpha, d.u, df)
+    return float(stats.ncf.sf(critical, d.u, df, f2 * (d.u + d.v + 1.0)))
 
 
 def effective_sample_size(n: float, null_trace: np.ndarray, k_y: int, k_x: int, k_c: float = 0) -> float:
@@ -92,17 +110,19 @@ def f2_to_r2(f2: float, k_y: int, k_x: int) -> float:
     return float(1.0 - (1.0 + f2) ** (-s))
 
 
-def minimum_detectable_r2(n: float, k_y: int, k_x: int, k_c: int, alpha: float, power: float = 0.80) -> float:
+def minimum_detectable_r2(n: float, k_y: int, k_x: int, k_c: int, alpha: float, power: float = 0.80,
+                          nu: float | None = None) -> float:
     """Smallest set-correlation R^2 detectable with the given power; 1.0 when
-    no effect is detectable (undefined test or insufficient samples)."""
-    if rao_degrees(n, k_y, k_x, k_c).v <= 0:
+    no effect is detectable (undefined test or insufficient samples). nu as
+    in set_correlation_power."""
+    if rao_degrees(n, k_y, k_x, k_c).v <= 0 or (nu is not None and np.isfinite(nu) and nu <= 0):
         return 1.0
     hi = 1.0
-    while set_correlation_power(n, k_y, k_x, k_c, hi, alpha) < power:
+    while set_correlation_power(n, k_y, k_x, k_c, hi, alpha, nu) < power:
         hi *= 2.0
         if hi > 1e6:
             return 1.0
-    f2 = brentq(lambda f: set_correlation_power(n, k_y, k_x, k_c, f, alpha) - power, 1e-9, hi, xtol=1e-6)
+    f2 = brentq(lambda f: set_correlation_power(n, k_y, k_x, k_c, f, alpha, nu) - power, 1e-9, hi, xtol=1e-6)
     return f2_to_r2(f2, k_y, k_x)
 
 

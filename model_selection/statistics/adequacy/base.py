@@ -13,7 +13,30 @@ to the fitted values, and the statistic is recomputed. The null model's own
 structure, including its dependence on the conditioning set, is therefore
 preserved in every draw, and, unlike a permutation of residuals, the draws
 reproduce residual spread that varies with the regressors (Winkler et al.,
-2014). The p-value is (M + 1) / (N + 1) (Phipson and Smyth, 2010). Rejection also requires a practically meaningful
+2014). On a regular time grid, a statistic that divides a quadratic form in the
+residuals by an estimate of their scale (an F statistic) is redrawn as its
+numerator over the observed denominator: in the data the denominator is an
+average over many samples and barely varies, whereas the draws' sum of
+squared multiplied residuals varies with the correlated multipliers
+(relative variance about 4b/3 at bandwidth fraction b), so recomputing it
+would give the draws a variability the statistic does not have. The draws
+then reproduce the numerator, a quadratic form in score sums, as the tiers'
+tests do, with the score regressors held fixed (the score bootstrap; Kline
+and Santos, 2012), and each is divided by a draw of the fixed-b variance
+functional (Kiefer and Vogelsang, 2005; multipliers.fixed_b_draws).
+
+Samples that are independent units (clusters of events) take the wild
+cluster restricted bootstrap instead (Cameron, Gelbach and Miller, 2008):
+one Rademacher sign per unit, each cluster's residuals scaled by the CR2
+correction of the null fit where the test supplies its residual maker
+(significance.clusters.cluster_scaled_residuals), and each draw's statistic
+recomputed whole, with its own denominator. With one sign per unit the
+draws' sum of squares does not vary with the signs, so the reason for the
+observed denominator does not arise; and refitting each draw removes the
+fit's projection of the multiplied residuals, which is larger than a
+per-sample correction restores when the regressors are shared within
+clusters, so draws over the observed denominator would be too small.
+The p-value is (M + 1) / (N + 1) (Phipson and Smyth, 2010). Rejection also requires a practically meaningful
 departure: the bias-corrected semipartial R^2 (the departure's share of all
 variance in obs after conditioning) must reach effect_size_floor, so large
 samples do not reject a simpler, more powerful tier for trivially small
@@ -35,7 +58,8 @@ from scipy import stats
 
 from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH, resolve_block
-from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights
+from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights, fixed_b_draws
+from model_selection.statistics.significance.clusters import cluster_scaled_residuals, smallest_p_value
 from model_selection.utils import as2d
 
 DRAW_CHUNK = 128  # bootstrap draws whose multipliers are generated at a time
@@ -156,6 +180,38 @@ class FunctionalFormTest(ABC):
         """Fitted values of obs under the null model (same shape as obs)."""
         ...
 
+    def _statistic_parts(
+            self, candidate: np.ndarray, obs: np.ndarray, conditioning: np.ndarray | None,
+    ) -> tuple[float, float, float, float] | None:
+        """For a statistic that divides a quadratic form in the residuals by
+        an estimate of their scale: (numerator, denominator, semipartial
+        numerator, semipartial denominator), with statistic = numerator /
+        denominator and semipartial effect = semipartial numerator /
+        semipartial denominator. Each null draw then recomputes the numerators
+        only and divides them by the observed denominators (module docstring).
+        None (the default) for score statistics, which have no denominator."""
+        return None
+
+    def _score_terms(self, candidate: np.ndarray, obs: np.ndarray, conditioning: np.ndarray | None,
+                     resid_null: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+        """The factors of the statistic's per-sample terms, as (left, right)
+        pairs whose column products, summed over samples, are the sums the
+        statistic is a quadratic form in: the null model's residuals and the
+        tested regressors (a regression test), or the residuals and their
+        kernel smooth, column by column (a kernel score r'Kr = sum_t r_t
+        (Kr)_t). The multipliers' bandwidth is set from their persistence
+        (significance.block_length.resolve_block), as for the tiers' tests
+        and the linear adjustment test. Subclasses implement it."""
+        raise NotImplementedError
+
+    def _null_residual_maker(self, candidate: np.ndarray, obs: np.ndarray,
+                             conditioning: np.ndarray | None) -> np.ndarray | None:
+        """The null model's residual maker R (n, n), r = R y, for the
+        cluster-level scaling of the bootstrapped residuals when samples are
+        independent units (significance.clusters.cluster_scaled_residuals).
+        None (the default): the per-sample scaling of _null_leverage is used."""
+        return None
+
     def _null_leverage(self, candidate: np.ndarray, obs: np.ndarray, conditioning: np.ndarray | None) -> np.ndarray:
         """1 - Var(r_t) / sigma^2 for the null model's residuals r_t under
         homoscedastic errors, for the scaling of the bootstrapped residuals:
@@ -217,28 +273,62 @@ class FunctionalFormTest(ABC):
         # bias-corrected on its own (R^2) scale.
         fitted_null = self._null_fit(candidate, obs, conditioning)
         resid_null = obs - fitted_null
-        leverage = np.asarray(self._null_leverage(candidate, obs, conditioning), dtype=float)
-        hc2 = 1.0 / np.sqrt(np.clip(1.0 - leverage, 1e-12, None))
-        scaled = resid_null * (hc2 if resid_null.ndim == 1 else hc2[:, None])
-        # Block length from the products of the resampled residuals with the
-        # candidate, from which the tested departure terms are built.
-        resolved = resolve_block(time_positions, min_temporal_lag, [(resid_null, candidate)], self.run_length,
+        # Bandwidth from the persistence of the statistic's own per-sample terms
+        # (_score_terms); the longest over the pairs, which share the multipliers.
+        resolved = resolve_block(time_positions, min_temporal_lag,
+                                 self._score_terms(candidate, obs, conditioning, resid_null), self.run_length,
                                  grid_step)
         block = resolved.length
+        units = resolved.independent_units
+        maker = self._null_residual_maker(candidate, obs, conditioning) if units else None
+        if maker is not None:
+            # Independent units (clusters of events): each cluster's residuals
+            # scaled by its block of the fit's residual covariance (CR2;
+            # significance.clusters.cluster_scaled_residuals).
+            scaled = cluster_scaled_residuals(resid_null, maker, time_positions)
+        else:
+            leverage = np.asarray(self._null_leverage(candidate, obs, conditioning), dtype=float)
+            hc2 = 1.0 / np.sqrt(np.clip(1.0 - leverage, 1e-12, None))
+            scaled = resid_null * (hc2 if resid_null.ndim == 1 else hc2[:, None])
+        # Independent units: one Rademacher multiplier per unit (multipliers
+        # module), and each draw's statistic recomputed whole, with its own
+        # denominator. The observed denominator is kept only on a regular grid
+        # (module docstring).
+        independent = "rademacher" if units else self.independent_multipliers
+        parts = None if units else self._statistic_parts(candidate, obs, conditioning)
         null_stats = np.empty(n_permutations)
         null_semipartial_effect_sizes = np.empty(n_permutations)
         for start in range(0, n_permutations, DRAW_CHUNK):
             stop = min(start + DRAW_CHUNK, n_permutations)
-            weights = dependent_wild_weights(time_positions, block, stop - start, rng,
-                                             independent=self.independent_multipliers)
+            weights = dependent_wild_weights(time_positions, block, stop - start, rng, independent=independent)
             for b, w in zip(range(start, stop), weights):
                 obs_b = fitted_null + scaled * (w if scaled.ndim == 1 else w[:, None])
-                stat_b, _, _, _, semipartial_b = self._compute_statistic(candidate, obs_b, conditioning)
+                if parts is None:
+                    stat_b, _, _, _, semipartial_b = self._compute_statistic(candidate, obs_b, conditioning)
+                else:
+                    # The draw's numerators over the observed denominators.
+                    num_b, _, semi_num_b, _ = self._statistic_parts(candidate, obs_b, conditioning)
+                    stat_b = num_b / parts[1] if parts[1] > 0 else 0.0
+                    semipartial_b = semi_num_b / parts[3] if parts[3] > 0 else 0.0
                 null_stats[b] = stat_b
                 null_semipartial_effect_sizes[b] = semipartial_b if semipartial_b is not None else 0.0
+        # The fixed-b reference distribution (multipliers.fixed_b_draws), as in
+        # the tiers' tests: each draw divided by a draw of the variance
+        # functional; ones off a regular grid. The semipartial draws serve only
+        # the chance level of the observed effect, their mean, so they are
+        # divided by the functional's mean, which corrects the bandwidth's
+        # downward bias in the multipliers' variance (statistics.power).
+        q = fixed_b_draws(resolved.bandwidth_fraction, n_permutations, rng, n_steps=resolved.grid_length)
+        null_stats /= q
+        null_semipartial_effect_sizes /= float(np.mean(q))
 
         p_used = permutation_p_value(observed_stat, null_stats)
-        significant = bool(p_used < self.alpha)
+        # Too few independent units for any test of this kind to reject at alpha
+        # (significance.clusters): a smaller p-value is an artefact of the
+        # residuals' scaling, and the check is untestable, not significant.
+        untestable = bool(units and resolved.n_blocks is not None
+                          and smallest_p_value(int(resolved.n_blocks)) >= self.alpha)
+        significant = bool(p_used < self.alpha) and not untestable
 
         if semipartial_effect_size is not None and self.effect_size_floor is not None:
             bias_corrected_semipartial, null_semipartial_effect_size_mean = bias_correct_association(
@@ -251,7 +341,10 @@ class FunctionalFormTest(ABC):
 
         reject = significant and meets_floor
 
-        if not significant:
+        if untestable:
+            decision_reason = (f"not rejected: untestable, {resolved.n_blocks:.0f} independent clusters cannot give a "
+                               f"p-value below alpha={self.alpha:.4g} (p={p_used:.4g} not used)")
+        elif not significant:
             decision_reason = f"not rejected: p={p_used:.4g} >= alpha={self.alpha:.4g}"
         elif not meets_floor:
             decision_reason = (

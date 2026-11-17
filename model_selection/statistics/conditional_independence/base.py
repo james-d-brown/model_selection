@@ -19,6 +19,8 @@ class JointTestResult:
     block_length : block length (or multiplier bandwidth) of the resampling,
         in time units; 0 or 1 means samples were resampled independently.
     dependence : how the block length was obtained (ResolvedBlock.to_record).
+    fixed_b : (B,) the draws of the fixed-b variance functional Q that each
+        row of null was divided by (multipliers.fixed_b_draws), or None.
     """
     names: list[str]
     observed: np.ndarray
@@ -26,9 +28,50 @@ class JointTestResult:
     diagnostics: dict[str, dict] = field(default_factory=dict)
     block_length: int | None = None
     dependence: dict | None = None
+    fixed_b: np.ndarray | None = None
 
     def index(self, name: str) -> int:
         return self.names.index(name)
+
+    def width_draws(self, k: int) -> np.ndarray:
+        """Candidate k's null draws for quantities that use their mean (the
+        chance level of an effect size, the effective sample size): the
+        undivided draws over the mean of Q, whose mean is the multipliers'
+        variance corrected for the bandwidth's downward bias, E[Q] = 1 - b +
+        b^2 / 3 (Kiefer and Vogelsang, 2005). The divided draws, which give
+        the p-value, have the larger mean E[1/Q] times the undivided one.
+        The null draws themselves without fixed-b."""
+        column = self.null[:, k]
+        if self.fixed_b is None:
+            return column
+        return column * self.fixed_b / float(np.mean(self.fixed_b))
+
+    def null_degrees_of_freedom(self, k: int = 0, q: int = 1) -> float | None:
+        """Degrees of freedom nu of the variance behind candidate k's null, for
+        a test of q restrictions (q = the candidate's columns times the
+        observations'), used in the power calculation (statistics.power). On
+        a regular grid, 2 E[Q]^2 / var(Q) from the fixed-b draws, the
+        chi-square whose first two moments match Q's (Satterthwaite, 1946).
+        For independent units (clusters of events), G - 1 for G clusters: the
+        degrees of freedom of a scale estimated from G cluster sums (Bester,
+        Conley and Hansen, 2011, for one restriction). Their F(q, G - q) for q
+        restrictions belongs to a Wald statistic that inverts a q x q
+        variance matrix estimated from the clusters, which the tiers'
+        statistics do not; for them G - q overstates the null's imprecision
+        (in simulated event samples with 3 features, 15 to 30 clusters, the
+        test detected an effect of the size so reported 89% to 100% of the
+        time, against the intended 80%). G - 1 is also conservative there (85%
+        to 93%) and close at many clusters (82% at 128). It can be zero or
+        negative: no effect is then detectable. The effective number of
+        clusters (diagnostics, significance.clusters.effective_clusters) is
+        reported, not used here. None otherwise (the null's precision is not
+        assessed). k and q are unused for clusters; q is kept for callers."""
+        dep = self.dependence or {}
+        if self.fixed_b is not None and self.fixed_b.size > 1 and np.var(self.fixed_b) > 0:
+            return float(2.0 * np.mean(self.fixed_b) ** 2 / np.var(self.fixed_b))
+        if dep.get("independent_units") and dep.get("n_blocks"):
+            return float(dep["n_blocks"]) - 1.0
+        return None
 
     @property
     def winner(self) -> str:

@@ -81,3 +81,17 @@ def test_effective_sample_size_shrinks_with_a_wider_null_and_is_capped():
     assert effective_sample_size(180_000, draws, 1, 1, 1) == pytest.approx(200, rel=0.05)
     assert effective_sample_size(50, draws, 1, 1, 1) == 50
     assert effective_sample_size(50, np.zeros(10), 1, 1, 1) == 50
+
+
+def test_few_degrees_of_freedom_in_the_null_raise_the_detectable_effect():
+    """With nu degrees of freedom in the null's variance estimate, the
+    detectable effect for one feature grows by about
+    ((t_nu,0.975 + t_nu,0.80) / (z_0.975 + z_0.80))^2; without nu, or with nu
+    far above the samples, it is unchanged."""
+    base = minimum_detectable_r2(400, 1, 1, 2, 0.05)
+    assert minimum_detectable_r2(400, 1, 1, 2, 0.05, nu=None) == base
+    assert np.isclose(minimum_detectable_r2(400, 1, 1, 2, 0.05, nu=1e6), base, rtol=1e-3)
+    for nu in (5, 9, 19):
+        ratio = minimum_detectable_r2(400, 1, 1, 2, 0.05, nu=nu) / base
+        expected = ((stats.t.ppf(0.975, nu) + stats.t.ppf(0.80, nu)) / (stats.norm.ppf(0.975) + stats.norm.ppf(0.80))) ** 2
+        assert ratio > 1 and abs(ratio / expected - 1) < 0.08

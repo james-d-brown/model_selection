@@ -18,9 +18,6 @@ selection. When the tier the escalation leads to is not calibrated on its
 own sample (the CMI tier's guard, at the round that leads there), it is not
 run: after a power-only escalation the current tier's selection stands,
 possibly incomplete; after a validity escalation no selection is reported.
-A tier escalated to that runs but could detect no contribution, however
-large, in its first round (smallest detectable R^2 of 1) is reported as
-such.
 """
 from __future__ import annotations
 
@@ -28,7 +25,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from model_selection.selection.greedy import SelectionResult, escalated_from_text, greedy_forward_selection
+from model_selection.selection.greedy import SelectionResult, greedy_forward_selection
 from model_selection.selection.tiers import SelectionSample, Tier
 
 
@@ -84,7 +81,6 @@ def run_tiered_selection(
     carried: list = []
     unconditional: dict = {}
     unconditional_effect: dict = {}
-    escalated: dict | None = None
     for i, tier in enumerate(tiers):
         result = greedy_forward_selection(tier.sample or sample, tier, n_permutations=n_permutations,
                                           alpha=alpha, max_selected=max_selected, rng=rng,
@@ -103,11 +99,6 @@ def run_tiered_selection(
             provisional_selection=[st.formulation for st in result.trajectory if st.accepted] if restarts else [],
             escalation_test=result.escalation_test,
         ))
-        if escalated is not None and len(result.trajectory) == escalated["round"]:
-            result.escalated_from = escalated
-            extra = escalated_from_text(result)
-            if extra:
-                result.stopped_reason = f"{result.stopped_reason}. {extra}"
         if not result.tier_rejected:
             return TieredSelectionResult(tier.name, result, attempted)
         if result.next_tier_unsupported is not None and i + 1 < len(tiers):
@@ -129,9 +120,5 @@ def run_tiered_selection(
             attempted.append(TierAttempt(tier=nxt, committed=True, reason=reason, run=False))
             return TieredSelectionResult(nxt, SelectionResult(stopped_reason=reason), attempted)
         carried = [st for st in result.trajectory if st.accepted] if result.escalation_continues else []
-        test = attempted[-1].escalation_test
-        escalated = ({"tier": tier.name, "round": test["round"], "detectable_r2": test["detectable_r2"]}
-                     if result.escalation_continues and test is not None and test["detectable_r2"] is not None
-                     else None)
     raise RuntimeError(f"Every tier was rejected: {[a.tier for a in attempted]}. The last tier "
                        "must have no adequacy checks.")

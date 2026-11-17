@@ -277,9 +277,9 @@ def test_after_a_power_only_escalation_to_an_unusable_tier_the_current_selection
     assert not second.test.calls
 
 
-def test_review_flags_report_an_unsupported_escalation_and_a_powerless_escalated_tier():
+def test_review_flags_report_an_unsupported_escalation():
     from model_selection.pipeline.results import PooledResult, review_flags
-    from model_selection.selection.greedy import SelectionResult, SelectionStep
+    from model_selection.selection.greedy import SelectionResult
     attempts = [{"tier": "linear", "committed": False, "reason": "tier rejected", "run": True,
                  "provisional_selection": ["a", "b"]},
                 {"tier": "nonlinear", "committed": True, "reason": "not run: ... no selection can be supported",
@@ -289,18 +289,12 @@ def test_review_flags_report_an_unsupported_escalation_and_a_powerless_escalated
     flags = review_flags(PooledResult(**base, attempted_tiers=attempts))
     flag = next(f for f in flags if f["code"] == "escalation_unsupported")
     assert "linear tier: ['a', 'b']" in flag["message"]
-    step = SelectionStep(formulation="c", association=0.1, p_value=0.5, accepted=False, n_selected_before=0,
-                         n_candidates_tested=2, dependence_lag=1, detectable_r2=1.0, tier="nonlinear")
-    attempts[1].update(run=True, reason="'c' not accepted")
-    flags = review_flags(PooledResult(**dict(base, selection=SelectionResult(trajectory=[step])), attempted_tiers=attempts))
-    assert "escalated_tier_undetectable" in [f["code"] for f in flags]
 
 
 def test_the_test_that_led_to_the_next_tier_is_recorded_and_flagged():
     """The relationship test that rejected the first tier is kept with that
     tier's attempt, its resampling diagnostics are flagged although its step
-    is not part of the committed selection, and the stopping round reports
-    the first tier's smallest detectable R^2 alongside the second's."""
+    is not part of the committed selection."""
     from model_selection.pipeline.results import PooledResult, review_flags
     dep = {"estimated": True, "few_blocks": True, "n_blocks": 30}
     first = Tier("t1", StubTest({"a": 0.5, "b": 0.0}), 0.02, [AdequacyCheck(
@@ -311,8 +305,6 @@ def test_the_test_that_led_to_the_next_tier_is_recorded_and_flagged():
     assert res.committed_tier == "t2" and res.selection.selected == ["a"]
     test = res.attempted_tiers[0].escalation_test
     assert (test["round"], test["candidate"], test["check"], test["p_value"]) == (2, "b", "effect modification", 0.001)
-    assert res.selection.escalated_from["tier"] == "t1"
-    assert "In the t1 tier, which tested this round before the escalation" in res.selection.stopped_reason
     base = dict(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade", selection=res.selection,
                 zero_flow_fraction={}, zero_flow_flag=False, min_temporal_lag=1, committed_tier="t2")
     flags = review_flags(PooledResult(**base, attempted_tiers=[a.to_record() for a in res.attempted_tiers]))
@@ -320,56 +312,22 @@ def test_the_test_that_led_to_the_next_tier_is_recorded_and_flagged():
                "next tier" in f["message"] for f in flags)
 
 
-def test_a_powerless_escalated_tier_is_flagged_when_its_detectable_r2_is_reported_as_1():
-    from model_selection.pipeline.results import PooledResult, review_flags
-    from model_selection.selection.greedy import SelectionResult, SelectionStep
-    step = SelectionStep(formulation="c", association=0.1, p_value=0.5, accepted=False, n_selected_before=0,
-                         n_candidates_tested=2, dependence_lag=1, detectable_r2=0.997, tier="cmi")
-    attempts = [{"tier": "nonlinear", "committed": False, "reason": "x", "run": True},
-                {"tier": "cmi", "committed": True, "reason": "y", "run": True}]
-    flags = review_flags(PooledResult(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade",
-                                      selection=SelectionResult(trajectory=[step]), zero_flow_fraction={},
-                                      zero_flow_flag=False, min_temporal_lag=1, committed_tier="cmi",
-                                      attempted_tiers=attempts))
-    assert "escalated_tier_undetectable" in [f["code"] for f in flags]
-
-
-def test_the_powerless_escalated_tier_flag_uses_the_margin():
-    from model_selection.pipeline.results import PooledResult, review_flags
-    from model_selection.selection.greedy import SelectionResult, SelectionStep
-
-    def flagged(detectable, meaningful=None):
-        step = SelectionStep(formulation="c", association=0.1, p_value=0.5, accepted=False, n_selected_before=0,
-                             n_candidates_tested=2, dependence_lag=1, detectable_r2=detectable, tier="cmi")
-        result = PooledResult(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade",
-                              selection=SelectionResult(trajectory=[step]), zero_flow_fraction={},
-                              zero_flow_flag=False, min_temporal_lag=1, committed_tier="cmi", meaningful_r2=meaningful,
-                              attempted_tiers=[{"tier": "nonlinear", "committed": False, "reason": "x", "run": True},
-                                               {"tier": "cmi", "committed": True, "reason": "y", "run": True}])
-        return "escalated_tier_undetectable" in [f["code"] for f in review_flags(result)]
-    assert flagged(0.99) and flagged(0.05) and not flagged(0.015)
-    assert not flagged(0.05, meaningful=0.1)
-
-
-def test_the_powerless_escalated_tier_flag_looks_at_the_stopping_round():
-    """A first round that accepted is not flagged for its own low power; the
-    round at which the tier stopped is what the flag judges."""
-    from model_selection.pipeline.results import PooledResult, review_flags
-    from model_selection.selection.greedy import SelectionResult, SelectionStep
-
-    def step(accepted, detectable):
-        return SelectionStep(formulation="c", association=0.1, p_value=0.01 if accepted else 0.5, accepted=accepted,
-                             n_selected_before=0, n_candidates_tested=2, dependence_lag=1, detectable_r2=detectable,
-                             tier="nonlinear")
-
-    def flagged(trajectory):
-        result = PooledResult(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade",
-                              selection=SelectionResult(trajectory=trajectory), zero_flow_fraction={},
-                              zero_flow_flag=False, min_temporal_lag=1, committed_tier="nonlinear",
-                              attempted_tiers=[{"tier": "linear", "committed": False, "reason": "x", "run": True},
-                                               {"tier": "nonlinear", "committed": True, "reason": "y", "run": True}])
-        return "escalated_tier_undetectable" in [f["code"] for f in review_flags(result)]
-    assert not flagged([step(True, 0.75), step(False, 0.015)])
-    assert flagged([step(True, 0.75), step(False, 0.19)])
-    assert not flagged([step(True, 0.75)])
-
+def test_adjustment_floor_never_exceeds_the_acceptance_floor():
+    """The linear adjustment test guards validity: with either side's nonlinear
+    share below the acceptance floor, a spurious contribution cannot reach it
+    (Cauchy-Schwarz; docs/methods.md, Linear tier), so its floor is the smaller
+    of the escalation floor and the acceptance floor."""
+    assert AdequacyConfig().resolved_adjustment_floor(SelectionConfig(meaningful_r2=0.5)) == 0.02
+    assert AdequacyConfig().resolved_adjustment_floor(SelectionConfig()) == 0.02
+    assert AdequacyConfig(effect_size_floor=0.01).resolved_adjustment_floor(SelectionConfig()) == 0.01
+    from model_selection.selection import tiers
+    seen = {}
+    real_spec = tiers.linear_specification_test
+    tiers.linear_specification_test = lambda *a, **k: seen.setdefault("floor", a[3])
+    try:
+        removal = next(c for c in build_tier("linear", SelectionConfig(meaningful_r2=0.5), AdequacyConfig()).adequacy_checks
+                       if c.stage == "removal")
+        removal.test(np.zeros(5), np.zeros(5), np.zeros((5, 1)))
+    finally:
+        tiers.linear_specification_test = real_spec
+    assert seen["floor"] == 0.02

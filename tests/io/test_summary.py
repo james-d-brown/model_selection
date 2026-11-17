@@ -86,11 +86,15 @@ def test_dependent_samples_in_a_local_permutation_produce_a_review_flag():
 
 def test_few_blocks_produces_a_labelled_heuristic_flag():
     result = _pooled(False)
+    # On a grid the flag follows the expected shortfall of the null's variance, persistence / bandwidth
+    # (significance.block_length), against its tolerance, a convention.
     result.selection.trajectory[0].dependence = {"block_length": 40, "estimated": True, "decorrelation_lag": 30,
-                                                 "dependence_decays": True, "n_blocks": 15.0, "few_blocks": True}
+                                                 "dependence_decays": True, "n_blocks": 15.0, "few_blocks": True,
+                                                 "persistence": 8.0, "expected_shortfall": 0.2}
     flags = review_flags(result)
     assert [f["code"] for f in flags] == ["few_blocks"]
-    assert "15 blocks" in flags[0]["message"] and "minimum of 50" in flags[0]["message"] and "% too small" in flags[0]["message"]
+    message = flags[0]["message"]
+    assert "15 bandwidths" in message and "20% too small" in message and "a convention" in message
 
 
 def test_a_pooled_cmi_selection_without_the_calibration_check_is_flagged():
@@ -126,13 +130,11 @@ def test_selected_encompassed_flag_requires_the_rounds_bonferroni_level():
 def test_outcome_line_states_each_pathway_and_the_union():
     from model_selection.pipeline.results import outcome_line
     pooled = _pooled(False)
-    pooled.selection.equivalence = [{"round": 1, "selected": "m1", "flag_level": 0.025, "comparisons": [
-        {"candidate": "m2", "relation": "encompassed_by_selected",
-         "candidate_adds_beyond_selected": {"p_value": 0.4}, "selected_adds_beyond_candidate": {"p_value": 0.001}}]}]
-    line = outcome_line(pooled=pooled)
-    assert line.startswith("G1: pooled {m1}: none replaceable")
-    pooled.selection.equivalence[0]["comparisons"][0]["relation"] = "equivalent"
-    assert "replaceable m1 by m2 (equivalent)" in outcome_line(pooled=pooled)
+    pooled.selection.classes = {"distinct": ["m1"], "exchangeable": {}, "not_shown_distinct": {},
+                                "redundant": ["m2"], "not_tested": [], "not_tested_reason": None}
+    assert outcome_line(pooled=pooled).startswith("G1: pooled {m1}: m1 distinct")
+    pooled.selection.classes.update(distinct=[], exchangeable={"m1": ["m2"]}, redundant=[])
+    assert "m1 exchangeable with m2" in outcome_line(pooled=pooled)
 
 
 def test_a_non_rejecting_check_on_too_few_samples_is_flagged():

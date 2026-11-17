@@ -124,6 +124,17 @@ class SelectionSample:
             raise ValueError("conditioning must have the same formulations as candidates")
         if self.censored is not None and set(self.censored.uncensored) != set(self.candidates):
             raise ValueError("censored must have the same formulations as candidates")
+        if self.censored is not None:
+            # The nonlinear tier recognizes a censored series by its record
+            # (preprocessing.censoring); without one it would regress the
+            # censored values directly, so a missing record is an error.
+            from model_selection.preprocessing.censoring import censoring_record
+            missing = [k for k, v in self.candidates.items() if censoring_record(v) is None]
+            if censoring_record(self.obs) is None:
+                missing.append("observations")
+            if missing:
+                raise ValueError("censored series must be made by CensoredSeries (censored_candidates, "
+                                 f"censored_obs) so that they carry their uncensored values: {missing}")
 
     @property
     def conditioning_series(self) -> dict[str, np.ndarray]:
@@ -143,13 +154,21 @@ class SelectionSample:
         positions and grid step; every row-aligned field is subset alike."""
         from dataclasses import replace
         rows = lambda d: None if d is None else {k: v[idx] for k, v in d.items()}
+        censored = None if self.censored is None else self.censored.subset(idx)
+        candidates, obs = rows(self.candidates), self.obs[idx]
+        if censored is not None:
+            # Censored again from the uncensored rows (the same values), so
+            # that the subsample's arrays carry their uncensored values too.
+            candidates = censored.censored_candidates()
+            if censored.obs_uncensored is not None:
+                obs = censored.censored_obs()
         return replace(
-            self, candidates=rows(self.candidates), obs=self.obs[idx], time_positions=time_positions,
+            self, candidates=candidates, obs=obs, time_positions=time_positions,
             grid_step=grid_step, covariates=None if self.covariates is None else self.covariates[idx],
             partialled_covariates=None if self.partialled_covariates is None else self.partialled_covariates[idx],
             clusters=None if self.clusters is None else self.clusters[idx],
             conditioning=rows(self.conditioning),
-            censored=None if self.censored is None else self.censored.subset(idx),
+            censored=censored,
             thinned_from=self.thinned_from if self.thinned_from is not None else self)
 
 
@@ -229,14 +248,27 @@ def _effect_modification_check(a: AdequacyConfig, floor: float, run_length: int,
 def _specification_check(a: AdequacyConfig, floor: float, run_length: int, max_n: int) -> AdequacyTestFunc:
     def _check(candidate, obs, conditioning, n_permutations=100, rng=None, time_positions=None,
                min_temporal_lag=0, column_labels=None, grid_step=None, interaction_with=None):
+        from model_selection.statistics.conditional_independence.linear import censored_mean_columns
+        extra = censored_mean_columns(candidate, obs, conditioning)
         columns = np.column_stack([as2d(candidate), as2d(obs)])
         return linear_specification_test(
             columns, conditioning, a.alpha, floor, n_permutations,
             rng or np.random.default_rng(), time_positions if time_positions is not None else np.arange(len(columns)),
             min_temporal_lag, column_labels=column_labels, run_length=run_length, grid_step=grid_step,
             n_candidate_columns=as2d(candidate).shape[1], max_n=max_n,
-            interaction_with=interaction_with,
+            interaction_with=interaction_with, extra_regressors=extra,
         )
+    return _check
+
+
+def _with_censored_means(check: AdequacyTestFunc) -> AdequacyTestFunc:
+    """The check with the censored series' fit-then-censor means added to its
+    conditioning set (conditional_independence.linear.augmented_conditioning),
+    as in the linear tier's own regressions: for the candidate linearity
+    test, whose regressions are least squares."""
+    def _check(candidate, obs, conditioning, *args, **kwargs):
+        from model_selection.statistics.conditional_independence.linear import augmented_conditioning
+        return check(candidate, obs, augmented_conditioning(candidate, obs, conditioning), *args, **kwargs)
     return _check
 
 
@@ -247,10 +279,14 @@ def build_tier(
         multivariate: bool = False,
         plot_factory: AdequacyPlotFactory | None = None,
         workers: int = -1,
+        events: bool = False,
 ) -> Tier:
     """The tier `name`. Adequacy checks are attached only when `adequacy` is
     given (cascade mode); diagnostic plots, when plot_factory is given, are
-    attached in every mode (docs/methods.md, Diagnostics)."""
+    attached in every mode (docs/methods.md, Diagnostics). events: the samples
+    are high-flow events (any number of feature columns), not a scalar time
+    series; the nonlinear tier then takes every variable's feature means by
+    regression, never by smearing a scalar series' residuals."""
     floor = effect_size_floor_for_tier(selection.effect_size_floor, name)
     a = adequacy
     plot = (lambda kind: plot_factory(kind, name)) if plot_factory else (lambda kind: None)
@@ -266,11 +302,12 @@ def build_tier(
                     alpha=a.alpha, effect_size_floor=adequacy_floor, ridge_lambda=a.ridge_lambda, run_length=run)
                 kind = "multivariate_linearity"
             else:
-                residual = make_linearity_adequacy_test(alpha=a.alpha, effect_size_floor=adequacy_floor,
-                                                        run_length=run)
+                residual = _with_censored_means(make_linearity_adequacy_test(
+                    alpha=a.alpha, effect_size_floor=adequacy_floor, run_length=run))
                 kind = "linearity"
             tier.adequacy_checks = [
-                AdequacyCheck("nonlinear dependence on the selected formulations", _specification_check(a, adequacy_floor, run, cap),
+                AdequacyCheck("nonlinear dependence on the selected formulations",
+                              _specification_check(a, a.resolved_adjustment_floor(selection), run, cap),
                               plot("linear_specification"), needs_conditioning=True, stage="removal",
                               labels_columns=True),
                 AdequacyCheck("nonlinear candidate-observation relation", residual, plot(kind),
@@ -283,7 +320,12 @@ def build_tier(
                                                  plot("state_independence"))
                                      if p is not None]
     elif name == "nonlinear":
-        tier = Tier("nonlinear", NonlinearResidualTest(run_length=run), floor)
+        test = NonlinearResidualTest(run_length=run)
+        if events:
+            # The smear path is the pooled pathway's method for a scalar series; an event sample takes the
+            # regression path whatever its number of components (NonlinearResidualTest.uncensored_feature_means).
+            test.uncensored_feature_means = "regression"
+        tier = Tier("nonlinear", test, floor)
         if a is not None:
             tier.adequacy_checks = [_effect_modification_check(a, adequacy_floor, run, plot("state_independence"), cap)]
         else:
@@ -325,11 +367,12 @@ def build_cascade(
         tier_samples: dict[str, SelectionSample] | None = None,
         plot_factory: AdequacyPlotFactory | None = None,
         workers: int = -1,
+        events: bool = False,
 ) -> list[Tier]:
     """The linear, nonlinear and CMI tiers in cascade order. tier_samples maps
     a tier name to a sample replacing the trial sample for that tier (used to
     subsample long pooled records for the costlier tiers)."""
-    tiers = [build_tier(name, selection, adequacy, multivariate, plot_factory, workers) for name in TIERS]
+    tiers = [build_tier(name, selection, adequacy, multivariate, plot_factory, workers, events) for name in TIERS]
     for tier in tiers:
         tier.sample = (tier_samples or {}).get(tier.name)
     tiers[2].adequacy_checks = []

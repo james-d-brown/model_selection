@@ -39,6 +39,7 @@ from tests.fixtures.basins import make_synthetic_basin, make_synthetic_basin_wit
 HF_EVENTS = EventConfig()
 
 
+@pytest.mark.integration
 def test_pipeline_runs_end_to_end_and_selects_informative_formulation():
     basin = make_synthetic_basin()
     result = run_basin(
@@ -60,6 +61,7 @@ def test_pipeline_runs_end_to_end_and_selects_informative_formulation():
     json.dumps(basin_result_to_dict(result))
 
 
+@pytest.mark.integration
 def test_pipeline_flags_high_zero_flow():
     basin = make_synthetic_basin(seed=1)
     idx = basin.obs.index
@@ -71,6 +73,7 @@ def test_pipeline_flags_high_zero_flow():
     assert result.zero_flow_fraction["formulation_zero_heavy"] > 0.3
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("measure", ["linear", "nonlinear", "cmi"])
 def test_pipeline_runs_end_to_end_across_all_measures(measure):
     basin = make_synthetic_basin(seed=4)
@@ -85,6 +88,7 @@ def test_pipeline_runs_end_to_end_across_all_measures(measure):
     json.dumps(as_dict)
 
 
+@pytest.mark.integration
 def test_pipeline_run_high_flow_false_skips_high_flow_pathway():
     result = run_basin(make_synthetic_basin(seed=6), SelectionConfig(n_permutations=50), run_high_flow=False,
                        rng=np.random.default_rng(7))
@@ -103,6 +107,7 @@ def test_config_objects_validate_their_values():
         EventConfig(consensus="bogus")
 
 
+@pytest.mark.integration
 def test_pipeline_cascade_escalates_beyond_linear_through_real_api():
     """A U-shaped candidate effect, which a straight line cannot detect, makes
     the linear tier inadequate (nonlinear-relation check); the cascade escalates and writes
@@ -132,6 +137,7 @@ def test_pipeline_cascade_escalates_beyond_linear_through_real_api():
         assert as_dict["committed_tier"] == result.committed_tier
 
 
+@pytest.mark.integration
 def test_pipeline_cascade_runs_on_both_pathways():
     basin = make_synthetic_basin(seed=8, n_hours=3000, n_events=15)
     result = run_basin(basin, SelectionConfig(measure="cascade", n_permutations=30), events=HF_EVENTS,
@@ -142,6 +148,7 @@ def test_pipeline_cascade_runs_on_both_pathways():
     json.dumps(basin_result_to_dict(result))
 
 
+@pytest.mark.integration
 def test_high_flow_selection_override():
     basin = make_synthetic_basin(seed=10, n_hours=1500, n_events=8)
     result = run_basin(basin, SelectionConfig(measure="cascade", n_permutations=30),
@@ -160,6 +167,7 @@ def test_structural_check_belongs_to_the_linear_tier_only():
         build_tier("cascade", SelectionConfig())
 
 
+@pytest.mark.integration
 def test_pooled_linear_reports_failed_magnitude_gate_in_result_and_json():
     rng = np.random.default_rng(0)
     n = 40
@@ -218,10 +226,11 @@ def test_independent_multivariate_candidate_rejected_by_linear_tier():
     assert result.selection.selected == []
     step = result.selection.trajectory[0]
     assert not step.accepted
-    # The effect is 1 - Wilks' lambda less its chance level from the null mean of Pillai's trace.
+    # The effect is 1 - Wilks' lambda less its chance level from the null mean of Pillai's trace, the mean of
+    # the width draws (corrected for the bandwidth's bias, not divided by the fixed-b draws).
     from model_selection.statistics.conditional_independence.linear import chance_level
     pc = step.diagnostics["partial_canonical_correlation"]
-    assert abs(step.effect - (pc - chance_level(np.array([step.null_mean]), q, p))) < 1e-9
+    assert abs(step.effect - (pc - chance_level(np.array([step.null_width_mean]), q, p))) < 1e-9
 
 
 def test_multivariate_adequacy_plots_written_through_real_cascade():
@@ -242,6 +251,7 @@ def test_multivariate_adequacy_plots_written_through_real_cascade():
             assert os.path.getsize(path) > 1000
 
 
+@pytest.mark.integration
 def test_wasp_runs_end_to_end_and_selects_informative_formulation():
     """WASP finds about one event per storm, so the record needs enough storms
     for the test to have power: 45 here (the default fixture has 15)."""
@@ -255,6 +265,7 @@ def test_wasp_runs_end_to_end_and_selects_informative_formulation():
     assert "formulation_noise" not in result.selection.selected
 
 
+@pytest.mark.integration
 def test_min_peak_separation_accepted_by_high_flow_pathway():
     result = run_high_flow_analysis(make_synthetic_basin(), SelectionConfig(measure="linear", n_permutations=20),
                                     events=EventConfig(pot=POTConfig(min_peak_separation=6)),
@@ -267,6 +278,7 @@ def _real_result(basin):
                                   rng=np.random.default_rng(1))
 
 
+@pytest.mark.integration
 def test_per_model_diagnostics_write_one_file_per_model():
     import model_selection.visualization.html as html_module
     import model_selection.visualization.hydrograph as hydro_module
@@ -288,6 +300,7 @@ def test_per_model_diagnostics_write_one_file_per_model():
         assert path.endswith(f"TESTGAGE01_high_flow_diagnostic_{model_name}.html")
 
 
+@pytest.mark.integration
 def test_per_model_diagnostics_off_by_default():
     import model_selection.visualization.hydrograph as hydro_module
     basin = make_synthetic_basin()
@@ -299,6 +312,7 @@ def test_per_model_diagnostics_off_by_default():
     assert per_model == {}
 
 
+@pytest.mark.integration
 def test_high_flow_pathway_passes_own_windows_to_output_writer():
     basin = make_synthetic_basin()
     with patch.object(hf_pathway, "write_high_flow_outputs", wraps=hf_pathway.write_high_flow_outputs) as mock_out, \
@@ -313,6 +327,7 @@ def test_high_flow_pathway_passes_own_windows_to_output_writer():
     assert kwargs["raw_formulations"] is not None
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("method", ["pot", "wasp"])
 def test_high_flow_pathway_handles_a_data_gap(method):
     result = run_high_flow_analysis(
@@ -322,6 +337,7 @@ def test_high_flow_pathway_handles_a_data_gap(method):
     assert result.selection is not None
 
 
+@pytest.mark.integration
 def test_regularization_does_not_alter_association_input():
     """Interpolated values must never reach estimation: a gap-free basin and
     the same basin with a gap select the same formulation. WASP finds about one
@@ -337,25 +353,21 @@ def test_regularization_does_not_alter_association_input():
         assert "formulation_noise" not in result.selection.selected
 
 
-def test_high_flow_reports_detectability_and_flags_unresolvable_threshold():
-    # Enough events for the detectable contribution to be below R^2 = 1.
+@pytest.mark.integration
+def test_high_flow_reports_classes_and_a_meaningful_threshold_never_stops_selection():
     basin = make_synthetic_basin(n_hours=10000, n_events=40, seed=4)
     unset = run_high_flow_analysis(basin, SelectionConfig(measure="linear", n_permutations=200),
                                    rng=np.random.default_rng(1))
     d = high_flow_result_to_dict(unset)
-    assert 0 < unset.detectable_r2 < 1 and unset.selection is not None
-    assert "80% power" in d["detectability"]["statement"]
-    assert d["detectability"]["unexplained_variation_pct"] == pytest.approx(100 * unset.detectable_r2)
-    assert all(s["detectability"] is not None for s in d["high_flow_trajectory"])
-    assert "cannot be excluded with 80% power" in unset.selection.stopped_reason
-    assert "meaningful_effect_undetectable" not in [f["code"] for f in d["review_flags"]]
-    # A threshold below what these data can detect.
-    strict = run_high_flow_analysis(basin, SelectionConfig(measure="linear", n_permutations=200,
-                                                           meaningful_r2=unset.detectable_r2 / 2),
+    assert unset.selection is not None and "detectability" not in d
+    assert all("detectability" not in s and "detectable_r2" not in s for s in d["high_flow_trajectory"])
+    assert all(s["outcome"] in ("selected", "detected_below_floor", "not_detected", "not_tested")
+               for s in d["high_flow_trajectory"])
+    if unset.selection.selected:
+        assert d["high_flow_classes"] is not None
+    strict = run_high_flow_analysis(basin, SelectionConfig(measure="linear", n_permutations=200, meaningful_r2=0.5),
                                     rng=np.random.default_rng(1))
     assert strict.selection is not None  # the threshold never stops selection
-    codes = [f["code"] for f in high_flow_result_to_dict(strict)["review_flags"]]
-    assert "meaningful_effect_undetectable" in codes
     json.dumps(high_flow_result_to_dict(strict))
 
 
@@ -364,6 +376,7 @@ def test_meaningful_r2_is_validated():
         SelectionConfig(meaningful_r2=1.5)
 
 
+@pytest.mark.integration
 def test_pathways_use_the_largest_decorrelation_lag():
     from model_selection.pipeline.shared import max_decorrelation_lag
     from model_selection.preprocessing.transforms import dependence_series
@@ -379,6 +392,7 @@ def test_pathways_use_the_largest_decorrelation_lag():
     assert pooled.min_temporal_lag == lag
 
 
+@pytest.mark.integration
 def test_pooled_seasonal_conditioning_is_on_by_default_and_can_be_disabled():
     from model_selection.pipeline import SeasonalConfig
     from model_selection.pipeline.results import pooled_result_to_dict
@@ -392,6 +406,7 @@ def test_pooled_seasonal_conditioning_is_on_by_default_and_can_be_disabled():
     assert any("disabled" in n for n in off.notes)
 
 
+@pytest.mark.integration
 def test_seasonal_conditioning_is_disabled_on_a_record_shorter_than_three_years():
     """On a 125-day record the calendar day does not recur, so neither pathway
     conditions on it; both say why and raise a review flag."""
@@ -408,6 +423,7 @@ def test_seasonal_conditioning_is_disabled_on_a_record_shorter_than_three_years(
         assert "seasonal_record_too_short" in [f["code"] for f in review_flags(result)]
 
 
+@pytest.mark.integration
 def test_pooled_tests_condition_on_the_seasonal_phase():
     """Every pooled test conditions on (sin, cos) of the day of year when the
     seasonal conditioning is on, and on nothing extra when it is off."""
@@ -431,6 +447,7 @@ def test_pooled_tests_condition_on_the_seasonal_phase():
     assert off.covariates is None
 
 
+@pytest.mark.integration
 def test_pooled_series_keep_their_seasonal_cycles():
     """The pooled tests analyse each series' standardized signed square root,
     with its seasonal cycle, and condition on the seasonal phase."""
@@ -453,6 +470,7 @@ def test_pooled_series_keep_their_seasonal_cycles():
         assert np.allclose(sample.candidates[name], prepare_series(series.values.astype(float))[rows])
 
 
+@pytest.mark.integration
 def test_high_flow_dependence_lag_is_adjusted_for_the_time_of_year_by_default_and_can_be_disabled():
     from model_selection.pipeline import SeasonalConfig
     from model_selection.pipeline.results import high_flow_result_to_dict
@@ -468,6 +486,7 @@ def test_high_flow_dependence_lag_is_adjusted_for_the_time_of_year_by_default_an
     assert any("with its seasonal cycle" in n for n in off.notes)
 
 
+@pytest.mark.integration
 def test_basis_sensitivity_check_repeats_the_stopping_round_with_the_main_features():
     """Each alternative basis describes every series exactly as the main
     sample does (duration feature included), and the K bases are tested at
@@ -493,6 +512,7 @@ def test_basis_sensitivity_check_repeats_the_stopping_round_with_the_main_featur
     assert shapes and all(d == result.n_components for d in shapes)
 
 
+@pytest.mark.integration
 def test_missing_values_are_explicit_and_excluded_on_the_same_basis_for_every_series():
     """A missing value in one series removes that timestep from every series
     in the pooled pathway; nothing is dropped from the basin itself."""
@@ -511,6 +531,7 @@ def test_missing_values_are_explicit_and_excluded_on_the_same_basis_for_every_se
     assert result.n_complete_timesteps == expected
 
 
+@pytest.mark.integration
 def test_an_observation_gap_keeps_the_event_and_a_formulation_gap_removes_it():
     basin = make_synthetic_basin(seed=6)
     first = run_high_flow_analysis(basin, SelectionConfig(measure="linear", n_permutations=20),
@@ -530,6 +551,7 @@ def test_an_observation_gap_keeps_the_event_and_a_formulation_gap_removes_it():
     assert all(not (ev.start <= event.peak_index <= ev.end) for ev in third.high_flow_events)
 
 
+@pytest.mark.integration
 def test_both_pathways_use_one_common_basis_and_flag_a_formulation_with_missing_values():
     """Missing values in a formulation where the observations exist remove
     those timesteps from every series in both pathways, and are flagged."""
@@ -549,6 +571,7 @@ def test_both_pathways_use_one_common_basis_and_flag_a_formulation_with_missing_
         assert not (ev.start <= 259 and ev.end >= 200)
 
 
+@pytest.mark.integration
 def test_event_detection_uses_each_formulations_own_values_where_observations_are_missing():
     """Masking a formulation where the observations are missing would replace
     its real values with interpolated ones; detection uses its own values,
@@ -572,6 +595,7 @@ def test_event_detection_uses_each_formulations_own_values_where_observations_ar
     assert result.selection is not None
 
 
+@pytest.mark.integration
 def test_phase_grid_defaults_to_the_longest_event_and_keeps_peaks():
     """No event curve is resampled onto fewer points than it has, so peaks
     are not lost between grid points."""
@@ -598,6 +622,7 @@ def test_roughness_penalty_is_the_same_functional_on_any_grid():
         assert ratio == pytest.approx((2 * np.pi) ** 4, rel=0.06)
 
 
+@pytest.mark.integration
 def test_seed_makes_a_run_repeatable_and_an_unseeded_run_records_its_seed():
     from model_selection.pipeline.pooled.pathway import run_pooled_analysis
     basin = make_synthetic_basin(seed=8)
@@ -611,14 +636,7 @@ def test_seed_makes_a_run_repeatable_and_an_unseeded_run_records_its_seed():
     assert [s.p_value for s in c.selection.trajectory] == [s.p_value for s in d.selection.trajectory]
 
 
-def test_pooled_result_flags_a_meaningful_threshold_below_the_detectable_contribution():
-    from model_selection.pipeline.results import review_flags
-    result = run_pooled_analysis(make_synthetic_basin(seed=9),
-                                 SelectionConfig(measure="linear", n_permutations=50, meaningful_r2=1e-6, seed=1))
-    assert result.meaningful_r2 == 1e-6
-    assert "meaningful_effect_undetectable" in [f["code"] for f in review_flags(result)]
-
-
+@pytest.mark.integration
 def test_high_flow_run_without_usable_events_is_flagged_untestable():
     """Formulations in which the detector finds no peaks give no consensus
     events; selection is not run, and the result says so with the untestable
@@ -632,6 +650,7 @@ def test_high_flow_run_without_usable_events_is_flagged_untestable():
     assert "untestable" in [f["code"] for f in review_flags(result)]
 
 
+@pytest.mark.integration
 def test_pooled_result_reports_subsampling_only_for_the_committed_tier():
     basin = make_synthetic_basin(n_hours=2600, seed=11)
     result = run_pooled_analysis(basin, SelectionConfig(n_permutations=30, seed=3))
@@ -651,6 +670,7 @@ def test_registration_covariates_are_the_log_window_length_and_the_peak_position
     assert reg[0] == pytest.approx([np.log(200), 1.0]) and reg[1] == pytest.approx([np.log(20), 5 / 19])
 
 
+@pytest.mark.integration
 def test_events_with_observation_gaps_stay_in_the_sample():
     basin = make_synthetic_basin(n_hours=20000, n_events=80, seed=4)
     complete = run_high_flow_analysis(basin, SelectionConfig(measure="linear", n_permutations=20),
@@ -667,6 +687,7 @@ def test_events_with_observation_gaps_stay_in_the_sample():
     assert any("gaps in the observations" in n for n in d["notes"])
 
 
+@pytest.mark.integration
 def test_cmi_calibration_check_runs_through_the_pipeline_and_is_recorded():
     # Pooled pathway, CMI tier, the calibration check on (the default): it runs on the
     # acceptance, and its result reaches the step and the result file.
@@ -681,6 +702,7 @@ def test_cmi_calibration_check_runs_through_the_pipeline_and_is_recorded():
     json.dumps(d)
 
 
+@pytest.mark.integration
 def test_an_uncalibrated_cmi_tier_withholds_the_acceptance_through_the_pipeline():
     import model_selection.selection.tiers as tiers
     uncalibrated = {"n_surrogates": 52, "false_acceptances": 12, "false_acceptance_rate": 12 / 52,
@@ -693,6 +715,7 @@ def test_an_uncalibrated_cmi_tier_withholds_the_acceptance_through_the_pipeline(
     assert "cmi_not_calibrated" in [f["code"] for f in pooled_result_to_dict(result)["review_flags"]]
 
 
+@pytest.mark.integration
 def test_wasp_flags_a_series_whose_scale_range_is_too_short():
     """The noise formulation's e-folding time is under one step, so WASP
     cannot resolve its events; the result says which series."""
@@ -705,6 +728,7 @@ def test_wasp_flags_a_series_whose_scale_range_is_too_short():
     assert "formulation_informative" not in flags["wasp_scale_range_too_short"]
 
 
+@pytest.mark.integration
 def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
     """With the decorrelation length as the rule for dependence between
     events, where the dependence lag would leave an event fewer than five
@@ -730,6 +754,7 @@ def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
     assert any("Theiler window reduced from 1200" in note for note in result.notes)
 
 
+@pytest.mark.integration
 def test_long_pooled_records_give_the_nonlinear_tier_the_full_cap(monkeypatch):
     """The nonlinear tier gets as many evenly spaced points as its cap allows,
     whatever the dependence lag; the free-form tier gets points at least one
@@ -761,6 +786,7 @@ def test_long_pooled_records_give_the_nonlinear_tier_the_full_cap(monkeypatch):
         assert np.array_equal(full.obs[rows], sub.obs)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("rule", ["recession", "arrivals", "lag"])
 def test_high_flow_dependence_rules(rule):
     """Each rule records which events are dependent. With clusters the

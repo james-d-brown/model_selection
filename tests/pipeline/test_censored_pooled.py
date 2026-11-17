@@ -36,6 +36,7 @@ def _captured_sample(monkeypatch, basin, censoring):
     return seen
 
 
+@pytest.mark.integration
 def test_censored_sample_censors_candidates_and_observations_and_conditions_on_uncensored_anomalies(monkeypatch):
     basin = make_synthetic_basin(seed=2)
     plain = _captured_sample(monkeypatch, basin, None)["sample"]
@@ -65,6 +66,7 @@ def test_censored_sample_censors_candidates_and_observations_and_conditions_on_u
     assert s.dependence_lag == plain.dependence_lag                      # from the uncensored formulations
 
 
+@pytest.mark.integration
 def test_censored_run_reports_its_censoring_and_writes_its_own_result_file(tmp_path):
     basin = make_synthetic_basin(seed=3)
     out = OutputConfig(output_dir=str(tmp_path), assumption_plots=False, dependence_plot=False)
@@ -91,6 +93,7 @@ def test_censored_run_reports_its_censoring_and_writes_its_own_result_file(tmp_p
         outcome_line(pooled_censored=plain)
 
 
+@pytest.mark.integration
 def test_censored_cascade_runs_its_subsamples_and_the_cmi_calibration_on_censored_data(monkeypatch):
     """The cascade on a long record: the nonlinear and CMI tiers get their own
     subsamples, which keep the censoring; the CMI calibration's surrogates
@@ -135,6 +138,7 @@ def test_censored_cascade_runs_its_subsamples_and_the_cmi_calibration_on_censore
     assert min(seen["surrogate_shares"]) > 0.75
 
 
+@pytest.mark.integration
 def test_run_basin_runs_the_censored_pooled_pathway_when_given_censoring():
     from model_selection.pipeline import basin_result_to_dict, run_basin
     basin = make_synthetic_basin(seed=3)

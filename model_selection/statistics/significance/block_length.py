@@ -3,7 +3,9 @@ Data-driven dependence lengths for autocorrelated samples.
 
 Two lengths are estimated from a series' autocorrelation by the procedure of
 Politis and White (2004), with the correction of Patton, Politis and White
-(2009):
+(2009). Only the first, the decorrelation lag, is used by the tests (it sets
+the dependence lag and the window of the multiplier bandwidth below); the
+second is not used by the tests:
 
 - the decorrelation lag m_hat, the lag beyond which the autocorrelation is
   statistically indistinguishable from zero (Politis, 2003): the first lag
@@ -30,13 +32,27 @@ When no run of insignificant autocorrelations occurs within the searched lags
 (the dependence does not decay within the record), m_hat is the largest
 significant lag, as in the reference code, and the condition is reported.
 
-The series analysed for a test is the one whose sum forms the statistic: the
-products of the two residual series being related: for two independent
-series, the autocorrelation of their products at each lag is the product of
-their autocorrelations, which sets the variance of the sum (Bayley and
-Hammersley, 1946; Clifford, Richardson and Hémon, 1989). With
-several product series the largest block length is used, because all
-candidates share one resampling.
+The decorrelation lag of each formulation's series sets the dependence lag
+(pipeline.shared). The tests' multiplier bandwidth is set differently
+(resolve_block): the statistic is a sum of products of two residual series,
+and the bandwidth must be chosen for testing, not for estimating a variance.
+The products' persistence a (their autocovariance-weighted mean lag) is
+estimated from their own autocovariances, fitted by a non-increasing,
+non-negative sequence (Geyer, 1992; Berg and Song, 2023), over the lags
+before the shorter of the two residual series' decorrelation lags or the
+products' own decorrelation lag, whichever is later. Two series that are
+independent at every lag have products that cannot stay correlated beyond
+either factor's dependence (Bartlett, 1935), and each factor's
+autocorrelation is measured far more precisely than the products' weak
+tail, which a search on the products themselves would cut short. The null
+hypothesis concerns matched time steps and does not make the series
+independent at other lags, so the products' own lag is kept as well. The
+bandwidth is then c sqrt(a N) on a grid of N steps (Sun,
+Phillips and Jin, 2008; Lazarus, Lewis, Stock and Watson, 2018), and the
+tests refer their statistics to the fixed-b distribution at b = l / N
+(Kiefer and Vogelsang, 2005; conditional_independence.multipliers.
+fixed_b_draws). With several candidates the longest bandwidth is used,
+because all share one resampling.
 
 The estimate applies to samples on a regular time grid: evenly spaced
 samples, evenly spaced subsamples (resampling.grid_subsample), and either of
@@ -58,31 +74,85 @@ from dataclasses import dataclass
 import numpy as np
 
 from model_selection.utils import as2d
+from model_selection.statistics.significance.clusters import smallest_p_value
 
 C_THRESHOLD = 2.0  # Politis and White (2004), Remark 2.3
 DEFAULT_RUN_LENGTH = 5  # Politis and White (2004), Remark 2.3
-# Fewest blocks before a test is flagged, a convention. With summable
-# autocovariances and fourth cumulants, the Bartlett-weighted variance the
-# resampling reproduces has relative bias -G/(b J) and relative variance
-# (4/3) b/n (Andrews, 1991, Proposition 1), and at the Politis-White block
-# length (b^3 = 2 G^2 n / D, D = (4/3) J^2) these are -sqrt(2 / (3B)) and
-# 4 / (3B) with B = n / b blocks: a relative root-mean-square error of
-# sqrt(2 / B), 20% at B = 50, of which the null is expected to be about 12%
-# too narrow. Holds for estimated block lengths only, not for the caller's
-# lag (event samples).
+# Fewest blocks or clusters before a test on samples not on a grid (event
+# samples, resampled with the caller's lag or one multiplier per cluster) is
+# flagged, a convention: with few clusters the wild cluster bootstrap can
+# fail (MacKinnon and Webb, 2017). Tests on evenly spaced samples are flagged
+# by their expected variance shortfall instead (SHORTFALL_TOLERANCE).
 MIN_BLOCKS = 50
 
 
-def expected_variance_shortfall(n_blocks: float) -> float:
-    """Expected relative shortfall of the resampled null's variance at the
-    Politis-White block length, sqrt(2 / (3B)) (see MIN_BLOCKS)."""
-    return float(np.sqrt(2.0 / (3.0 * n_blocks)))
 # Fewest observations from which autocorrelations are estimated: Box and
 # Jenkins (1976) advise about 50 for a useful estimate of the autocorrelation
 # function, a convention. Below it, a sample's dependence is not estimated and
 # the caller's dependence lag (the spacing that made the samples approximately
 # independent) is used, as for samples not on a grid.
 MIN_ACF_N = 50
+
+TESTING_BANDWIDTH_CONSTANT = 0.79
+"""c in the multipliers' bandwidth l = c sqrt(a N) (testing_bandwidth): the
+testing-optimal rate for the Bartlett kernel (Sun, Phillips and Jin, 2008),
+with the constant of Lazarus, Lewis, Stock and Watson (2018), whose rule
+1.3 sqrt(N) is for a first-order autoregression of coefficient 0.7
+(a = 2.75), here scaled by each series' own persistence a. Their loss
+weighs errors in the test's level nine times errors in its power, and the
+rule accepts a shortfall of the null's variance of about sqrt(a / N) / c
+(ResolvedBlock.expected_shortfall, implied_level). They fix the persistence
+at a reference value; estimating it, as here, is an extension."""
+SHORTFALL_TOLERANCE = 0.12
+"""Expected relative shortfall of the resampled null's variance above which
+a test on evenly spaced samples is flagged (few_blocks), a convention: the
+truncation bias a / l of the Bartlett-weighted variance (Andrews, 1991)."""
+
+
+def _non_increasing_fit(y: np.ndarray) -> np.ndarray:
+    """The least-squares fit of y by a non-increasing sequence (isotonic
+    regression by pooling adjacent violators; Barlow, Bartholomew, Bremner
+    and Brunk, 1972)."""
+    y = np.asarray(y, dtype=float)
+    values, weights, counts = [], [], []
+    for v in y:
+        values.append(v); weights.append(1.0); counts.append(1)
+        while len(values) > 1 and values[-2] < values[-1]:
+            w = weights[-2] + weights[-1]
+            values[-2] = (weights[-2] * values[-2] + weights[-1] * values[-1]) / w
+            weights[-2] = w
+            counts[-2] += counts[-1]
+            del values[-1], weights[-1], counts[-1]
+    return np.repeat(values, counts)
+
+
+def persistence(acov: np.ndarray, window: int) -> float:
+    """The persistence a = G / J of a series whose autocovariances at lags
+    0.. are `acov`, from its autocovariances at lags 1..window fitted by the
+    closest non-increasing, non-negative sequence g (Geyer, 1992; Berg and
+    Song, 2023): G = 2 sum k g(k), J = acov[0] + 2 sum g(k). a is the
+    autocovariance-weighted mean lag, in lag units; it is zero only when no
+    autocovariance in the window is positive (independent terms). The window
+    comes from the factors of a product series (resolve_block)."""
+    acov = np.asarray(acov, dtype=float)
+    M = int(min(max(window, 0), acov.size - 1))
+    if acov[0] <= 0 or M < 1:
+        return 0.0
+    g = np.clip(_non_increasing_fit(acov[1:M + 1]), 0.0, None)
+    k = np.arange(1, M + 1)
+    G = 2.0 * float(np.sum(k * g))
+    J = float(acov[0]) + 2.0 * float(np.sum(g))
+    return G / J if G > 0 and J > 0 else 0.0
+
+
+def testing_bandwidth(a: float, N: int) -> int:
+    """The multipliers' bandwidth, in grid steps, for a statistic whose terms
+    have persistence a over a grid of N steps: c sqrt(a N)
+    (TESTING_BANDWIDTH_CONSTANT), at least 1 (independent multipliers when
+    a = 0) and at most N / 2."""
+    if a <= 0 or N < 2:
+        return 1
+    return int(min(max(1, np.ceil(TESTING_BANDWIDTH_CONSTANT * np.sqrt(a * N))), max(1, N // 2)))
 
 
 @dataclass
@@ -147,10 +217,17 @@ def estimate_dependence(x: np.ndarray, run_length: int = DEFAULT_RUN_LENGTH) -> 
 
 
 def dependence_from_autocovariance(acov: np.ndarray, N: int, n: int,
-                                   run_length: int = DEFAULT_RUN_LENGTH) -> DependenceEstimate:
+                                   run_length: int = DEFAULT_RUN_LENGTH,
+                                   bartlett: bool = False) -> DependenceEstimate:
     """The Politis–White decorrelation lag and block length from the
     autocovariances acov[0..max_lag] of a series spanning N grid steps with n
-    observed values (see the module docstring)."""
+    observed values (see the module docstring).
+
+    bartlett : scale the band at lag k by Bartlett's (1946) standard error of
+        an autocorrelation beyond lag k - 1, sqrt(1 + 2 sum_{j<k} rho_j^2),
+        rather than that of white noise (Box and Jenkins, 1976): an
+        autocorrelation at lag k is then judged against its own sampling
+        variability given the autocorrelation at shorter lags."""
     run_length = max(1, int(run_length))
     max_lag = acov.size - 1
     if n < MIN_ACF_N or acov[0] <= 0 or max_lag < 1:
@@ -158,6 +235,8 @@ def dependence_from_autocovariance(acov: np.ndarray, N: int, n: int,
 
     rho = np.abs(acov[1:] / acov[0])  # lags 1..max_lag
     crit = C_THRESHOLD * np.sqrt(np.log10(n) / n)
+    if bartlett:
+        crit = crit * np.sqrt(1.0 + 2.0 * np.concatenate([[0.0], np.cumsum(rho[:-1] ** 2)]))
     insignificant = (rho < crit).astype(int)
     decays = False
     if run_length <= insignificant.size:
@@ -224,7 +303,7 @@ class ResolvedBlock:
     """Block length used by one resampling, and how it was obtained.
 
     length, decorrelation_lag : in time units.
-    estimated : True when it is a Politis–White estimate (evenly spaced
+    estimated : True when it is estimated from the products (evenly spaced
         samples); False when it is the caller's dependence lag.
     decays : as in DependenceEstimate, over all product series (False if any
         series failed to decay).
@@ -247,9 +326,42 @@ class ResolvedBlock:
     n_samples: int | None = None
     too_few_to_assess: bool = False
     independent_units: bool = False
+    persistence: float | None = None
+    window: int | None = None
+    factor_window: int | None = None
+    """The window the factors alone give (estimated bandwidths only); `window`
+    is longer where the products stay autocorrelated beyond it."""
+    bandwidth_fraction: float | None = None
+    grid_length: int | None = None
+    """Steps of the regular grid the samples lie on (estimated bandwidths only)."""
+
+    @property
+    def expected_shortfall(self) -> float | None:
+        """For an estimated bandwidth, the expected relative shortfall of the
+        resampled null's variance, a / l: the dependence beyond the
+        bandwidth that the Bartlett weights leave out (Andrews, 1991)."""
+        if not self.estimated or self.persistence is None or self.length <= 0:
+            return None
+        return float(self.persistence / self.length)
+
+    def implied_level(self, alpha: float = 0.05) -> float | None:
+        """Level of a test of nominal level alpha on one sum whose null variance
+        falls short by expected_shortfall: 2 (1 - Phi(z sqrt(1 - shortfall))),
+        z the normal quantile at 1 - alpha / 2. First order in the shortfall
+        this is the size distortion of Lazarus et al. (2018) for one
+        restriction; a statistic built from several sums is distorted more.
+        None without an estimated bandwidth."""
+        from scipy import stats
+        shortfall = self.expected_shortfall
+        if shortfall is None:
+            return None
+        z = stats.norm.ppf(1.0 - alpha / 2.0)
+        return float(2.0 * stats.norm.sf(z * np.sqrt(max(0.0, 1.0 - shortfall))))
 
     @property
     def few_blocks(self) -> bool:
+        if self.estimated and self.expected_shortfall is not None:
+            return self.expected_shortfall >= SHORTFALL_TOLERANCE
         return self.n_blocks is not None and self.n_blocks < MIN_BLOCKS
 
     def to_record(self) -> dict:
@@ -257,7 +369,15 @@ class ResolvedBlock:
                 "decorrelation_lag": self.decorrelation_lag, "dependence_decays": self.decays,
                 "n_blocks": self.n_blocks, "few_blocks": self.few_blocks,
                 "n_samples": self.n_samples, "too_few_to_assess": self.too_few_to_assess,
-                "independent_units": self.independent_units}
+                "independent_units": self.independent_units, "persistence": self.persistence,
+                "persistence_window": self.window, "factor_window": self.factor_window,
+                "window_extended_by_products": (None if self.window is None or self.factor_window is None
+                                                else bool(self.window > self.factor_window)),
+                "bandwidth_fraction": self.bandwidth_fraction,
+                "expected_shortfall": self.expected_shortfall,
+                "implied_level_at_5pct": self.implied_level(0.05),
+                "smallest_p_value": (smallest_p_value(int(self.n_blocks)) if self.independent_units
+                                     and self.n_blocks is not None else None)}
 
 
 def trace_autocovariance(P: np.ndarray, grid_index: np.ndarray, length: int) -> np.ndarray:
@@ -320,40 +440,111 @@ def _caller_lag_block(time_positions: np.ndarray, fallback_lag: float) -> "Resol
     return ResolvedBlock(length, estimated=False, n_samples=int(t.size), n_blocks=n_blocks, independent_units=units)
 
 
+def _factor_window(acovs: list, length: int, n: int, run_length: int) -> tuple[int, bool, bool]:
+    """(window, decays, assessed) for a product of two factors: the lags
+    before the shorter of the factors' decorrelation lags, each the largest
+    over its columns (or its trace autocovariance), so that a factor with no
+    significant autocorrelation (decorrelation lag 1) gives an empty window
+    and independent terms. When the two factors are independent as series
+    (at every lag) given the conditioning set, the products' autocovariance
+    at a lag is the product of the factors' autocovariances there
+    (Bartlett, 1935; Clifford, Richardson and Hemon, 1989), which vanishes
+    where either factor's does. The null hypothesis concerns matched time
+    steps only and does not imply this: dependence between the factors at
+    other lags adds the product of their cross-covariances at lags +k and
+    -k. The window is therefore extended to the products' own decorrelation
+    lag where that is later (_product_window)."""
+    sides = []
+    for side in acovs:
+        estimates = [dependence_from_autocovariance(a, length, n, run_length) for a in side]
+        if not all(e.assessed for e in estimates):
+            return 1, True, False
+        sides.append((max(e.decorrelation_lag for e in estimates), all(e.decays for e in estimates)))
+    return min(m for m, _ in sides) - 1, all(d for _, d in sides), True
+
+
+def _product_window(terms: np.ndarray, length: int, n: int, run_length: int) -> tuple[int, bool]:
+    """(window, decays) from the products themselves: the lags before their
+    own decorrelation lag (Politis, 2003), from their (trace) autocovariances
+    `terms`. It needs no assumption about the factors, and covers what the
+    factors' window (_factor_window) leaves out: autocovariance of the
+    products that comes from dependence between the factors at other lags.
+    The factors' window covers what this one leaves out: a weak tail that
+    the factors' autocorrelations show and the products' do not. The longer
+    of the two is used."""
+    e = dependence_from_autocovariance(np.asarray(terms, dtype=float), length, n, run_length, bartlett=True)
+    if not e.assessed:
+        return 0, True
+    return e.decorrelation_lag - 1, e.decays
+
+
+def _resolved(results: list, step: float, length: int, n_samples: int) -> "ResolvedBlock":
+    """The ResolvedBlock shared by all candidates from each candidate's
+    (bandwidth in steps, persistence, window, decays): the longest bandwidth,
+    since all candidates share one set of multipliers."""
+    steps, a, window, _, factor_window = max(results, key=lambda r: r[0])
+    return ResolvedBlock(
+        length=int(round(steps * step)), estimated=True,
+        decorrelation_lag=int(round((max(r[2] for r in results) + 1) * step)),
+        decays=all(r[3] for r in results),
+        n_blocks=float(length / steps), n_samples=n_samples,
+        persistence=float(a * step), window=int(round(window * step)),
+        factor_window=int(round(factor_window * step)),
+        bandwidth_fraction=float(steps / length), grid_length=int(length),
+    )
+
+
 def resolve_block_from_inner_products(
         time_positions: np.ndarray,
         fallback_lag: float,
-        inner_products: list[np.ndarray],
+        inner_products: list,
         run_length: int = DEFAULT_RUN_LENGTH,
         grid_step: float | None = None,
+        factors: list | None = None,
 ) -> "ResolvedBlock":
-    """Block length for a statistic that is the squared norm of the mean of
-    vector-valued per-sample terms u_i, given each candidate's matrix of
-    centred inner products <u_i, u_j>: the largest Politis–White estimate
-    over the candidates, from the trace autocovariance (trace_autocovariance),
-    when the samples lie on a regular grid; otherwise the caller's
-    dependence lag. An item may instead be a callable returning the centred
-    vectors u_i as rows, so that no n x n matrix is formed
-    (trace_autocovariance_features)."""
+    """Multiplier bandwidth for a statistic that is the squared norm of the
+    sum of vector-valued per-sample terms u_i = vec(c_i o_i'), products of a
+    candidate's and the observations' (centred) per-sample vectors, when the
+    samples lie on a regular grid; otherwise the caller's dependence lag.
+
+    inner_products: per candidate, the matrix of centred inner products
+    <u_i, u_j>, or a callable returning the centred u_i as rows (so that no
+    n x n matrix is formed). factors: per candidate, (candidate's vectors,
+    observations' vectors), each as rows or as a matrix of inner products
+    <c_i, c_j>. The persistence of the terms is estimated from their own
+    trace autocovariance within the window set by the factors (persistence,
+    _factor_window), and the bandwidth is testing_bandwidth of it."""
     n_samples = int(np.asarray(time_positions).size)
     layout = grid_layout(time_positions, grid_step) if inner_products else None
     if layout is None:
         return _caller_lag_block(time_positions, fallback_lag)
     step, gi, length = layout
     n = gi.size
-    estimates = [dependence_from_autocovariance(
-        trace_autocovariance_features(P(), gi, length) if callable(P) else trace_autocovariance(P, gi, length),
-        length, n, run_length) for P in inner_products]
-    if not all(e.assessed for e in estimates):
-        return ResolvedBlock(int(round(max(fallback_lag, 0))), estimated=False, n_samples=n_samples,
-                             too_few_to_assess=n < MIN_ACF_N)
-    steps = max(e.block_length for e in estimates)
-    return ResolvedBlock(
-        length=int(round(steps * step)), estimated=True,
-        decorrelation_lag=int(round(max(e.decorrelation_lag for e in estimates) * step)),
-        decays=all(e.decays for e in estimates),
-        n_blocks=float(length / steps), n_samples=n_samples,
-    )
+
+    def trace_acov(X):
+        X = X() if callable(X) else X
+        if X.ndim == 2 and X.shape[0] == X.shape[1] == n and factors_are_gram:
+            return trace_autocovariance(X, gi, length)
+        return trace_autocovariance_features(X - X.mean(axis=0), gi, length)
+
+    results = []
+    for item, pair in zip(inner_products, factors if factors is not None else [None] * len(inner_products)):
+        terms = trace_autocovariance_features(item(), gi, length) if callable(item) else \
+            trace_autocovariance(item, gi, length)
+        if pair is None:
+            raise ValueError("resolve_block_from_inner_products needs each candidate's factors")
+        factors_are_gram = not callable(item)
+        window, decays, assessed = _factor_window([[trace_acov(pair[0])], [trace_acov(pair[1])]], length, n,
+                                                  run_length)
+        if not assessed or n < MIN_ACF_N:
+            return ResolvedBlock(int(round(max(fallback_lag, 0))), estimated=False, n_samples=n_samples,
+                                 too_few_to_assess=n < MIN_ACF_N)
+        factor_window = window
+        own, own_decays = _product_window(terms, length, n, run_length)
+        window, decays = max(window, own), decays and own_decays
+        a = persistence(terms, window)
+        results.append((testing_bandwidth(a, length), a, window, decays, factor_window))
+    return _resolved(results, step, length, n_samples)
 
 
 def product_dependence(left: np.ndarray, right: np.ndarray, run_length: int = DEFAULT_RUN_LENGTH,
@@ -382,27 +573,47 @@ def resolve_block(
         run_length: int = DEFAULT_RUN_LENGTH,
         grid_step: float | None = None,
 ) -> ResolvedBlock:
-    """Block length for one resampling: the largest Politis–White estimate
-    over the residual products in `pairs` when the samples lie on a regular
-    grid (evenly spaced, or on the declared grid_step with missing points),
-    otherwise the caller's dependence lag. n_blocks is the grid's span in
-    blocks."""
+    """Multiplier bandwidth for one resampling of a statistic built from the
+    sums of the products of two residual series, `pairs` holding each
+    candidate's (left, right) residuals, when the samples lie on a regular
+    grid (evenly spaced, or on the declared grid_step with missing points);
+    otherwise the caller's dependence lag.
+
+    For each candidate the products of every left column with every right
+    column (each centred) form the statistic's terms. Their persistence is
+    estimated from their summed autocovariance within the window set by the
+    factors (persistence, _factor_window), and the bandwidth is
+    testing_bandwidth of it. The longest bandwidth over the candidates is
+    used, since they share one set of multipliers. n_blocks is the grid's
+    span in bandwidths."""
     n_samples = int(np.asarray(time_positions).size)
     layout = grid_layout(time_positions, grid_step) if pairs else None
     if layout is None:
         return _caller_lag_block(time_positions, fallback_lag)
     step, gi, length = layout
-    estimates = [e for a, b in pairs for e in product_dependence(a, b, run_length, (gi, length))]
-    if not all(e.assessed for e in estimates):
-        return ResolvedBlock(int(round(max(fallback_lag, 0))), estimated=False, n_samples=n_samples,
-                             too_few_to_assess=gi.size < MIN_ACF_N)
-    steps = max(e.block_length for e in estimates)
-    return ResolvedBlock(
-        length=int(round(steps * step)), estimated=True,
-        decorrelation_lag=int(round(max(e.decorrelation_lag for e in estimates) * step)),
-        decays=all(e.decays for e in estimates),
-        n_blocks=float(length / steps), n_samples=n_samples,
-    )
+    n = gi.size
+    results = []
+    for left, right in pairs:
+        L, R = as2d(left), as2d(right)
+        L, R = L - L.mean(axis=0), R - R.mean(axis=0)
+        max_lag = searched_lags(length, run_length)
+        if n < MIN_ACF_N:
+            return ResolvedBlock(int(round(max(fallback_lag, 0))), estimated=False, n_samples=n_samples,
+                                 too_few_to_assess=True)
+        acovs = [[_autocovariances(on_grid(X[:, j], gi, length), max_lag) for j in range(X.shape[1])]
+                 for X in (L, R)]
+        window, decays, assessed = _factor_window(acovs, length, n, run_length)
+        if not assessed:
+            return ResolvedBlock(int(round(max(fallback_lag, 0))), estimated=False, n_samples=n_samples,
+                                 too_few_to_assess=n < MIN_ACF_N)
+        terms = sum(_autocovariances(on_grid(L[:, i] * R[:, j], gi, length), max_lag)
+                    for i in range(L.shape[1]) for j in range(R.shape[1]))
+        factor_window = window
+        own, own_decays = _product_window(terms, length, n, run_length)
+        window, decays = max(window, own), decays and own_decays
+        a = persistence(terms, window)
+        results.append((testing_bandwidth(a, length), a, window, decays, factor_window))
+    return _resolved(results, step, length, n_samples)
 
 
 def samples_independent(

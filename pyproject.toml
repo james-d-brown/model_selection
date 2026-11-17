@@ -29,3 +29,6 @@ include = ["model_selection*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: runs a whole pathway end to end (run_basin, run_pooled_analysis, run_high_flow_analysis); select with -m integration, or exclude with -m 'not integration'",
+]

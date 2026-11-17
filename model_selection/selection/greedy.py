@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from model_selection.selection.tiers import SelectionSample, Tier
-from model_selection.statistics.power import effective_sample_size, format_share, minimum_detectable_r2
+from model_selection.statistics.power import effective_sample_size
 from model_selection.statistics.conditional_independence import LinearResidualTest
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH
 from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
@@ -55,18 +55,21 @@ def _with_effect_diagnostics(dependence: dict | None, test, candidate, effect_si
     low-rank approximation is material when the residual sums of squares may
     still change by a fraction eps with rank (rank_change): the effect size, one
     minus a ratio of them, may then move by about 2 eps, which is material
-    when that reaches the effect-size floor. A capped feature factor is
-    material whenever it occurs."""
+    when that reaches the effect-size floor. The effect size's own direction
+    is also refitted at half its factor's rank; a change of the floor or more
+    is material. A capped feature factor is material whenever it occurs."""
     if dependence is None:
         return None
     out = dict(dependence)
     extra = getattr(test, "magnitude_diagnostics", {}).get(id(candidate))
     if extra:
         out["crossfit_blocks_short"] = bool(out.get("crossfit_blocks_short")) or extra["crossfit_blocks_short"]
-        for key in ("low_rank_cap_share", "low_rank_rank_change"):
-            out[key] = max(float(out.get(key, 0.0)), extra[key])
+        for key in ("low_rank_cap_share", "low_rank_rank_change", "effect_half_rank_change"):
+            if key in extra:
+                out[key] = max(float(out.get(key, 0.0)), extra[key])
     if "low_rank_rank_change" in out:
         out["low_rank_material"] = bool(2.0 * out["low_rank_rank_change"] >= effect_size_floor
+                                        or out.get("effect_half_rank_change", 0.0) >= effect_size_floor
                                         or out.get("feature_factor_cap_share", 0.0) > 0)
     return out
 
@@ -80,20 +83,16 @@ class SelectionStep:
     with the floor (the association minus its null mean in the linear and
     free-form tiers, the cross-fitted magnitude in the nonlinear tier); p_value is calibrated against the maximum across the
     n_candidates_tested candidates. diagnostics reports the test's assumption
-    diagnostics (docs/methods.md, Diagnostics). detectable_r2
-    is the smallest set-correlation R^2 the linear tier could detect with 80%
-    power at this step (Cohen, 1988) with effective_sample_size independent
-    samples, matched to the linear tier's resampled null on this step's sample
-    (docs/methods.md, Detectable effect and the meaningful-effect
-    threshold). It is an optimistic bound in every tier: it ignores the
-    calibration against the maximum over candidates and the effect-size gate,
-    and the other tiers have less power. block_length is the block length (or
+    diagnostics (docs/methods.md, Diagnostics). effective_sample_size is the
+    number of independent samples whose null matches the linear tier's
+    resampled null on this step's sample (statistics.power; docs/methods.md,
+    Effective sample size). block_length is the block length (or
     multiplier bandwidth) the significance test's resampling used, and
     dependence how it was obtained (docs/methods.md, Dependence between samples).
-    thinning: when the tier ran on a subsample of the record, the same
-    effective sample size and detectable R^2 on the whole record, and the
-    share of the record's effective samples the subsample keeps
-    (_thinning_record; docs/methods.md, Dependence between samples).
+    thinning: when the tier ran on a subsample of the record, the effective
+    sample size on the whole record and the share of the record's effective
+    samples the subsample keeps (_thinning_record; docs/methods.md, Dependence
+    between samples).
     """
     formulation: str
     association: float
@@ -104,6 +103,10 @@ class SelectionStep:
     dependence_lag: int
     null_mean: float = 0.0
     null_std: float = 0.0
+    null_width_mean: float | None = None
+    """Mean of the winner's width draws (JointTestResult.width_draws), from
+    which the linear tier's chance level is computed; null_mean is that of
+    the draws behind the p-value, which differ by the fixed-b division."""
     effect: float = 0.0
     magnitude_unsubstantiated: bool = False
     diagnostics: dict = field(default_factory=dict)
@@ -115,8 +118,9 @@ class SelectionStep:
     cmi_calibration: dict | None = None
     samples_per_dimension: float = float("inf")
     low_samples_per_dimension: bool = False
-    detectable_r2: float | None = None
     effective_sample_size: float | None = None
+    outcome: str | None = None
+    """What the step shows (step_outcome), set by the selection stage."""
     thinning: dict | None = None
     block_length: int | None = None
     dependence: dict | None = None
@@ -146,9 +150,19 @@ class SelectionResult:
     diagnostic_plot_paths: list[str] = field(default_factory=list)
     ill_posed: bool = False
     ill_posed_reason: str | None = None
+    untestable: bool = False
+    """True when a round could not be tested because the sample has too few
+    independent clusters of events for any p-value below alpha
+    (statistics.significance.clusters); ill_posed_reason says why. The
+    selection is then the formulations accepted before that round."""
     equivalence: list[dict] = field(default_factory=list)
     equivalent_sets: list[dict] = field(default_factory=list)
     equivalent_sets_summary: str = ""
+    classes: dict | None = None
+    """The class of every formulation after selection: distinct, exchangeable,
+    redundant or not tested (selection.equivalence.formulation_classes;
+    docs/methods.md, Interchangeable formulations). None when the comparisons
+    were not run."""
     next_tier_unsupported: str | None = None
     """Set on a rejected trial whose escalation leads to a tier that cannot
     be used on its sample (not calibrated); the cascade then does not run it."""
@@ -158,26 +172,30 @@ class SelectionResult:
     continues from them rather than restarting."""
     escalation_test: dict | None = None
     """On a rejected trial, the test that rejected the tier: round,
-    candidate, check, p-value, level, resampling diagnostics, and the round's
-    smallest detectable R^2 in this tier (for a power-only rejection)."""
-    escalated_from: dict | None = None
-    """Set by the cascade when the trial's last round was first tested in the
-    previous tier, before a power-only escalation: that tier's name, the round
-    and its smallest detectable R^2 for the round, to report alongside this
-    tier's."""
+    candidate, check, p-value, level and resampling diagnostics."""
 
 
-def escalated_from_text(selection: "SelectionResult") -> str:
-    """For a trial whose last round was first tested in the previous tier
-    before a power-only escalation, that tier's smallest detectable R^2 for
-    the round, which is usually more informative than the escalated tier's;
-    "" otherwise."""
-    prior = selection.escalated_from
-    last = selection.trajectory[-1] if selection.trajectory else None
-    if not prior or last is None or last.accepted or prior.get("detectable_r2") is None:
-        return ""
-    return (f"In the {prior['tier']} tier, which tested this round before the escalation, contributions below "
-            f"R^2 = {format_share(prior['detectable_r2'])} cannot be excluded with 80% power.")
+STEP_OUTCOMES = {
+    "selected": "a contribution was detected, and its estimated size is at least the acceptance floor",
+    "detected_below_floor": "a contribution was detected, but its estimated size is below the acceptance floor",
+    "not_detected": "no contribution was detected; this is not evidence that none exists",
+    "not_tested": "no test could be relied on: the free-form tier is not calibrated on the sample",
+}
+"""The outcomes of a selection step (step_outcome), with their meaning
+(docs/methods.md, Step outcomes and the meaningful-effect threshold)."""
+
+
+def step_outcome(step: "SelectionStep", alpha: float) -> str:
+    """What a step's test shows, from its decision alone (STEP_OUTCOMES): its
+    acceptance, its p-value and whether its estimated size reached the floor.
+    A step that passed both gates but was not accepted had its acceptance
+    withheld by the free-form tier's calibration test: it was not tested by a
+    test that can be relied on."""
+    if step.accepted:
+        return "selected"
+    if step.p_value >= alpha:
+        return "not_detected"
+    return "detected_below_floor" if step.magnitude_unsubstantiated else "not_tested"
 
 
 def _stack_selected(candidate_series: dict, selected: list[str],
@@ -195,29 +213,30 @@ def _censor_kwarg(censor) -> dict:
 
 
 def _thinning_record(record: SelectionSample, selected: list[str], winner: str, n_eff: float, n: int,
-                     n_permutations: int, alpha: float, k_partialled: float, round_no: int,
-                     run_length: int) -> dict:
+                     n_permutations: int, k_partialled: float, round_no: int, run_length: int) -> dict:
     """The information a tier's subsample keeps of the whole record, for the
-    step's winner: the effective sample size and smallest detectable R^2 of
-    the linear tier's test on the whole record, computed as for the step's
-    own sample (statistics.power), and the share of the record's effective
-    samples the subsample keeps (docs/methods.md, Dependence
-    between samples). The record's null draws come from a fixed random stream of
-    their own, so the selection's draws are unchanged."""
+    step's winner: the effective sample size of the linear tier's test on the
+    whole record, computed as for the step's own sample (statistics.power),
+    and the share of the record's effective samples the subsample keeps
+    (docs/methods.md, Dependence between samples). The record's null draws
+    come from a fixed random stream of their own, so the selection's draws are
+    unchanged."""
     z_full = _stack_selected(record.conditioning_series, selected, record.covariates)
     values, obs = record.candidates[winner], record.obs
     k_y, k_x = as2d(obs).shape[1], as2d(values).shape[1]
     k_c = (0 if z_full is None else z_full.shape[1]) + k_partialled
     n_full = len(obs)
     t = record.time_positions if record.time_positions is not None else np.arange(n_full)
-    null = LinearResidualTest(run_length=run_length).run(
-        {winner: values}, obs, z_full, n_permutations, np.random.default_rng([THINNING_STREAM, round_no]), t,
-        record.dependence_lag, grid_step=record.grid_step).null[:, 0]
-    n_eff_full = effective_sample_size(n_full, null, k_y, k_x, k_c)
+    stream = np.random.default_rng([THINNING_STREAM, round_no])
+    full = LinearResidualTest(run_length=run_length).run(
+        {winner: values}, obs, z_full, n_permutations, stream, t, record.dependence_lag, grid_step=record.grid_step)
+    width = LinearResidualTest(run_length=run_length).unrestricted_width_draws(
+        values, obs, z_full, n_permutations, stream, t, record.dependence_lag, grid_step=record.grid_step,
+        test=full)
+    n_eff_full = effective_sample_size(n_full, width, k_y, k_x, k_c)
     return {"n_samples": int(n), "n_samples_record": int(n_full), "effective_sample_size": float(n_eff),
             "effective_sample_size_record": float(n_eff_full),
-            "information_retained": float(min(1.0, n_eff / n_eff_full)) if n_eff_full > 0 else None,
-            "detectable_r2_record": minimum_detectable_r2(n_eff_full, k_y, k_x, k_c, alpha)}
+            "information_retained": float(min(1.0, n_eff / n_eff_full)) if n_eff_full > 0 else None}
 
 
 def _calibration_summary(calibration: dict) -> str:
@@ -330,6 +349,19 @@ def greedy_forward_selection(
                     f"with {n_permutations} resamples.")
         result = tier.test.run({c: candidates[c] for c in remaining}, obs, z, n_permutations, rng,
                                time_positions, lag, grid_step=sample.grid_step)
+        smallest = (result.dependence or {}).get("smallest_p_value")
+        if smallest is not None and smallest >= alpha:
+            # Too few independent units (clusters of events) for the sign-flip
+            # null to reach alpha (statistics.significance.clusters): no
+            # candidate could be accepted, whatever the data.
+            reason = (f"{(result.dependence or {}).get('n_blocks', 0):.0f} independent clusters of events: the "
+                      f"smallest attainable p-value, {smallest:.3g}, is not below alpha = {alpha:g}")
+            stopped_reason = (f"round {round_no} untestable: {reason}; selection ends with the formulations "
+                              "already selected")
+            logger.info(f"[!] {stopped_reason}.")
+            if not selected:
+                return finish(selected=[], ill_posed=True, ill_posed_reason=reason, untestable=True)
+            return finish(ill_posed_reason=reason, untestable=True)
         if round_no == 1:
             unconditional = {nm: float(v) for nm, v in zip(result.names, result.observed)}
         # The round's winner is the candidate with the largest effect size among
@@ -353,7 +385,7 @@ def greedy_forward_selection(
         def effect_of(nm):
             k = result.index(nm)
             return tier.test.magnitude(candidates[nm], obs, z, time_positions, lag, float(result.observed[k]),
-                                       result.null[:, k], grid_step=sample.grid_step)
+                                       result.width_draws(k), grid_step=sample.grid_step)
         if hasattr(tier.test, "magnitudes"):
             # The test pools the eigendecompositions of all these effect sizes (nonlinear tier).
             effects = tier.test.magnitudes({nm: candidates[nm] for nm in ranked}, obs, z, time_positions, lag)
@@ -430,8 +462,7 @@ def greedy_forward_selection(
                 logger.info(f"[!] {stopped_reason}; trial discarded, escalation required.")
                 return finish(selected=[], tier_rejected=True, tier_rejection_reason=outcome.decision_reason,
                               escalation_test={"round": round_no, "candidate": winner, "check": check.name,
-                                               "p_value": outcome.p_value, "dependence": outcome.dependence,
-                                               "detectable_r2": None})
+                                               "p_value": outcome.p_value, "dependence": outcome.dependence})
 
         null_column = result.null[:, w]
         effect, effect_null_mean = effects[winner]
@@ -451,17 +482,24 @@ def greedy_forward_selection(
         k_y, k_x = as2d(obs).shape[1], as2d(winner_values).shape[1]
         k_c = (0 if z is None else z.shape[1]) + k_partialled
         if isinstance(tier.test, LinearResidualTest):
-            linear_null = null_column
+            linear_result = result
         else:
             # The linear tier's null on this step's sample, from an independent
             # random stream so the selection's own draws are unchanged.
-            linear_null = LinearResidualTest(run_length=getattr(tier.test, "run_length", DEFAULT_RUN_LENGTH)).run(
+            linear_result = LinearResidualTest(run_length=getattr(tier.test, "run_length", DEFAULT_RUN_LENGTH)).run(
                 {winner: winner_values}, obs, z, n_permutations, rng.spawn(1)[0], time_positions, lag,
-                grid_step=sample.grid_step).null[:, 0]
-        n_eff = effective_sample_size(n, linear_null, k_y, k_x, k_c)
-        detectable_r2 = minimum_detectable_r2(n_eff, k_y, k_x, k_c, alpha)
+                grid_step=sample.grid_step)
+        # The null's width, as a number of independent samples (statistics.power).
+        # The width comes from the observations' unrestricted residuals, so that
+        # the winner's own effect does not widen it
+        # (LinearResidualTest.unrestricted_width_draws), at the linear test's bandwidth.
+        width = LinearResidualTest(run_length=getattr(tier.test, "run_length", DEFAULT_RUN_LENGTH)
+                                   ).unrestricted_width_draws(winner_values, obs, z, n_permutations, rng.spawn(1)[0],
+                                                              time_positions, lag, grid_step=sample.grid_step,
+                                                              test=linear_result)
+        n_eff = effective_sample_size(n, width, k_y, k_x, k_c)
         thinning = (None if sample.thinned_from is None else
-                    _thinning_record(sample.thinned_from, selected, winner, n_eff, n, n_permutations, alpha,
+                    _thinning_record(sample.thinned_from, selected, winner, n_eff, n, n_permutations,
                                      k_partialled, round_no, getattr(tier.test, "run_length", DEFAULT_RUN_LENGTH)))
         trajectory.append(SelectionStep(
             formulation=winner, association=float(result.observed[w]), p_value=p_value, accepted=accepted, tier=tier.name,
@@ -469,12 +507,14 @@ def greedy_forward_selection(
             block_length=result.block_length,
             dependence=_with_effect_diagnostics(result.dependence, tier.test, winner_values, tier.effect_size_floor),
             null_mean=float(np.mean(null_column)), null_std=float(np.std(null_column, ddof=1)),
+            null_width_mean=float(np.mean(result.width_draws(w))),
             effect=bias_corrected,
             magnitude_unsubstantiated=magnitude_unsubstantiated,
-            diagnostics=result.diagnostics.get(winner, {}),
+            diagnostics={**result.diagnostics.get(winner, {}),
+                         **({"effective_clusters": linear_result.diagnostics[winner]["effective_clusters"]}
+                            if "effective_clusters" in linear_result.diagnostics.get(winner, {}) else {})},
             samples_per_dimension=samples_per_dimension,
             low_samples_per_dimension=bool(samples_per_dimension < min_samples_per_dimension),
-            detectable_r2=detectable_r2,
             effective_sample_size=n_eff,
             thinning=thinning,
             cmi_calibration=calibration,
@@ -577,8 +617,7 @@ def greedy_forward_selection(
                               next_tier_unsupported=unsupported, escalation_continues=True,
                               escalation_test={"round": round_no, "candidate": nm, "check": check.name,
                                                "p_value": outcome.p_value, "level": level,
-                                               "dependence": outcome.dependence,
-                                               "detectable_r2": step.detectable_r2})
+                                               "dependence": outcome.dependence})
 
         if not accepted:
             failed = []
@@ -598,10 +637,6 @@ def greedy_forward_selection(
                 # Significant, but the point estimate of its size is below the floor.
                 stopped_reason += (f". The contribution is statistically significant (p={p_value:.4g}), but its "
                                    "estimated size is below the effect-size floor")
-            elif detectable_r2 is not None and detectable_r2 < 1.0:
-                stopped_reason += (f". Contributions below R^2 = {format_share(detectable_r2)} "
-                                   f"({format_share(100 * detectable_r2)}% of the remaining unexplained variation) "
-                                   "cannot be excluded with 80% power")
             break
         selected.append(winner)
         remaining.remove(winner)

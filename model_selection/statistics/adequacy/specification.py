@@ -18,9 +18,15 @@ residuals, each divided by sqrt(1 - h_t) with h_t its leverage (the HC2
 correction; Davidson and Flachaire, 2008), by multipliers of mean zero and
 variance one, correlated over the dependence lag (Shao, 2010), refits on Z
 and recomputes the statistic. It is valid when the residuals' spread varies
-with Z. On samples on a regular time
-grid the bandwidth of the multipliers is the Politis–White block length of
-the statistic's per-sample terms r_t (K r)_t. The effect size is the share of
+with Z. On samples on a regular time grid the draws recompute the numerator
+r'Kr and divide it by the observed r'r (adequacy.base: the draws' r'r would
+vary with the correlated multipliers, as the data's does not), the bandwidth
+of the multipliers is set from the persistence of the statistic's per-sample
+terms r_t (K r)_t (significance.block_length), and each draw is divided by a
+draw of the fixed-b variance functional (multipliers.fixed_b_draws).
+Clusters of events take the wild cluster restricted bootstrap: one
+Rademacher sign per cluster, residuals scaled by cluster (CR2), and each
+draw's own r'r (adequacy.base). The effect size is the share of
 the residuals' variation that a kernel ridge regression on Z explains
 (penalty by restricted maximum likelihood), bias-corrected by its mean over
 the null draws. On long records the test runs on max_n evenly spaced points
@@ -33,9 +39,13 @@ an approximation at the cap changes which departures the test is most
 sensitive to, not its calibration. Below the cap every quantity is the one
 computed from the kernel's full eigendecomposition.
 
-A column rejects when its p-value is below alpha divided by the number of
-columns tested (Bonferroni) and its bias-corrected effect reaches the
-effect-size floor.
+A column rejects when its p-value is below its side's level and its
+bias-corrected effect reaches the effect-size floor. The tier is invalid only
+when both sides depart, so the null hypothesis, that at least one side is
+linear, is a union, and the test that rejects only when each side rejects at
+level alpha has level alpha (the intersection-union test; Berger, 1982). Each
+side is therefore tested at alpha, divided among that side's columns and the
+kernel parts only (Bonferroni).
 
 See docs/methods.md, Linear tier.
 """
@@ -46,7 +56,8 @@ import numpy as np
 from model_selection.statistics.adequacy.base import AdequacyTestOutcome
 from model_selection.statistics.adequacy.kernels import (
     kernel_spectrum, project, rbf_kernel, reml_lambda_from_spectrum)
-from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights
+from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights, fixed_b_draws
+from model_selection.statistics.significance.clusters import cluster_scaled_residuals, smallest_p_value
 from model_selection.statistics.regression.kernel_residuals import _median_bandwidth, _rbf_column, standardize
 from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH, resolve_block
@@ -56,17 +67,27 @@ from model_selection.utils import as2d
 DRAW_CHUNK = 128  # bootstrap draws processed at a time
 
 
-def _kernel_scores(R: np.ndarray, eigvals: np.ndarray, V: np.ndarray, lam: float) -> tuple[np.ndarray, np.ndarray]:
+def _kernel_scores(R: np.ndarray, eigvals: np.ndarray, V: np.ndarray, lam: float,
+                   total: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """For residual vectors in the columns of R (n, m): the score r'Kr / r'r
     and the share of r's variation explained by the kernel ridge fit on K
     with penalty lam, from K's spectrum (V may be a thin basis: the part of r
-    outside it is left unexplained)."""
+    outside it is left unexplained). total, when given, replaces each
+    column's own r'r in both denominators: the observed residuals' sum of
+    squares, for the null draws (module docstring)."""
     P, outside = project(V, R)
-    total = np.sum(P ** 2, axis=0) + outside
-    total = np.where(total > 0, total, 1.0)
+    if total is None:
+        total = np.sum(P ** 2, axis=0) + outside
+        total = np.where(total > 0, total, 1.0)
+    else:
+        total = total if total > 0 else 1.0
     score = (eigvals[:, None] * P ** 2).sum(axis=0) / total
-    left = (((lam / (eigvals + lam))[:, None] * P) ** 2).sum(axis=0) + outside
-    share = 1.0 - left / total
+    # The share explained, not one minus the share left: for a null draw the denominator
+    # is the observed residuals' sum of squares, and variation the draw lacks (removed by
+    # its projection off the null model's regressors) must not count as explained. For
+    # the observed residuals the two are identical.
+    explained = ((1.0 - (lam / (eigvals + lam)) ** 2)[:, None] * P ** 2).sum(axis=0)
+    share = explained / total
     return score, np.clip(share, 0.0, 1.0)
 
 
@@ -85,6 +106,7 @@ def linear_specification_test(
         n_candidate_columns: int | None = None,
         max_n: int = 2000,
         interaction_with: np.ndarray | None = None,
+        extra_regressors: np.ndarray | None = None,
 ) -> AdequacyTestOutcome:
     """Test every column of `columns` for nonlinear dependence on the
     conditioning set.
@@ -111,10 +133,16 @@ def linear_specification_test(
         covariates, so it tests every product of a conditioning column and a
         covariate together (Maity and Lin, 2011). A column departs when
         either part rejects for it.
+    extra_regressors : functions of the conditioning set added to the null
+        model's least-squares design but not to the kernel: the censored
+        series' fit-then-censor means (conditional_independence.linear.
+        censored_mean_columns), so that the test asks whether the residuals of
+        the linear tier's own regressions still depend on the conditioning set.
     """
     Y = as2d(np.asarray(columns, dtype=float))
     Z = as2d(np.asarray(conditioning, dtype=float))
     W_int = None if interaction_with is None else as2d(np.asarray(interaction_with, dtype=float))
+    X_extra = None if extra_regressors is None else as2d(np.asarray(extra_regressors, dtype=float))
     if column_labels is not None and len(column_labels) != Y.shape[1]:
         raise ValueError(f"column_labels has {len(column_labels)} entries for {Y.shape[1]} columns")
     time_positions = np.asarray(time_positions)
@@ -123,9 +151,11 @@ def linear_specification_test(
                                                            at_lag_spacing=False)
         Y, Z = Y[idx], Z[idx]
         W_int = None if W_int is None else W_int[idx]
+        X_extra = None if X_extra is None else X_extra[idx]
     n = Y.shape[0]
-    design = np.column_stack([np.ones(n), Z])
-    Q, _ = np.linalg.qr(design)
+    design = np.column_stack([np.ones(n), Z] + ([] if X_extra is None else [X_extra]))
+    U_, sv_, _ = np.linalg.svd(design, full_matrices=False)
+    Q = U_[:, sv_ > sv_[0] * max(design.shape) * np.finfo(float).eps]   # to numerical rank
     hc2 = 1.0 / np.sqrt(np.clip(1.0 - np.sum(Q ** 2, axis=1), 1e-12, None))
     Zs = standardize(Z)
     bw = _median_bandwidth(Zs)
@@ -150,10 +180,11 @@ def linear_specification_test(
     kernels = [(part, sp) for (part, _), sp in zip(spectra, run_tasks([f for _, f in spectra]))]
     blocks = []
 
-    def column_outcomes(spectrum, level):
+    def column_outcomes(spectrum, levels):
         eigvals, V, _ = spectrum
         found = []
         for j in range(Y.shape[1]):
+            level = levels[j]
             y = Y[:, j]
             resid = y - Q @ (Q.T @ y)
             P, outside = project(V, resid[:, None])
@@ -164,19 +195,45 @@ def linear_specification_test(
             blocks.append(resolved)
             null_stats = np.empty(n_permutations)
             null_semi = np.empty(n_permutations)
+            units = resolved.independent_units
+            if units:
+                # Independent units (clusters of events): one Rademacher sign each,
+                # residuals scaled by cluster (CR2), and each draw's own r'r as its
+                # denominator (adequacy.base).
+                independent, total = "rademacher", None
+                scaled = cluster_scaled_residuals(resid, np.eye(n) - Q @ Q.T, time_positions)
+            else:
+                independent, total = "gaussian", float(resid @ resid)
+                scaled = resid * hc2
             for start in range(0, n_permutations, DRAW_CHUNK):
                 stop = min(start + DRAW_CHUNK, n_permutations)
-                W = dependent_wild_weights(time_positions, resolved.length, stop - start, rng)
-                R = (W * (resid * hc2)[None, :]).T
+                W = dependent_wild_weights(time_positions, resolved.length, stop - start, rng, independent=independent)
+                R = (W * scaled[None, :]).T
                 R = R - Q @ (Q.T @ R)
-                null_stats[start:stop], null_semi[start:stop] = _kernel_scores(R, eigvals, V, lam)
+                null_stats[start:stop], null_semi[start:stop] = _kernel_scores(R, eigvals, V, lam, total=total)
+            # The fixed-b reference distribution on a regular grid; the semipartial
+            # draws, used only for their mean, divided by the functional's mean (base module).
+            q = fixed_b_draws(resolved.bandwidth_fraction, n_permutations, rng, n_steps=resolved.grid_length)
+            null_stats /= q
+            null_semi /= float(np.mean(q))
             p = permutation_p_value(observed, null_stats)
             corrected, _ = bias_correct_association(semipartial, null_semi)
-            found.append((p < level and corrected >= effect_size_floor, p, j, semipartial, corrected))
+            # Too few independent units to reject at this level (significance.clusters): untestable.
+            untestable = bool(units and resolved.n_blocks is not None
+                              and smallest_p_value(int(resolved.n_blocks)) >= level)
+            found.append((p < level and corrected >= effect_size_floor and not untestable, p, j, semipartial,
+                          corrected))
         return found
 
-    level = alpha / len(kernels) / Y.shape[1]
-    by_part = [(part, column_outcomes(spectrum, level)) for part, spectrum in kernels]
+    # Each side at alpha (intersection-union; module docstring), divided among the side's columns and the kernel
+    # parts. Without sides, any rejecting column rejects, so all columns share alpha.
+    if n_candidate_columns is None:
+        side_sizes = [Y.shape[1]]
+    else:
+        side_sizes = [n_candidate_columns, Y.shape[1] - n_candidate_columns]
+    levels = [alpha / len(kernels) / size for size in side_sizes for _ in range(size)]
+    level = min(levels)  # the strictest, reported for the untestable flag: both sides must be able to reject
+    by_part = [(part, column_outcomes(spectrum, levels)) for part, spectrum in kernels]
     # A column's outcome: its departing part if any (the smaller p-value first), else its smallest p-value.
     outcomes, parts = [], []
     for j in range(Y.shape[1]):
@@ -201,7 +258,7 @@ def linear_specification_test(
     _, p, j, semipartial, corrected = worst
     where = name(j)
     if rejected:
-        detail = "; ".join(f"{name(w[2])}: p={w[1]:.4g} < {level:.4g}, bias-corrected semipartial "
+        detail = "; ".join(f"{name(w[2])}: p={w[1]:.4g} < {levels[w[2]]:.4g}, bias-corrected semipartial "
                            f"R^2={w[4]:.4g} >= {effect_size_floor:.4g}" for w in worst_by_side)
         both = " (both the candidate and the observations)" if n_candidate_columns is not None else ""
         reason = f"rejected: the selected formulations cannot be removed linearly{both}: {detail}"
@@ -224,5 +281,8 @@ def linear_specification_test(
             "few_blocks": any(b.few_blocks for b in blocks),
             "n_samples": blocks[0].n_samples,
             "too_few_to_assess": any(b.too_few_to_assess for b in blocks),
+            "independent_units": blocks[0].independent_units,
+            "smallest_p_value": blocks[0].to_record()["smallest_p_value"],
+            "level": level,
         },
     )

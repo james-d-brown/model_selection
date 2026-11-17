@@ -223,8 +223,11 @@ def test_adequacy_resamples_derived_from_alpha():
 def test_nonlinear_tier_magnitude_is_on_the_set_correlation_scale():
     """The effect compared with the floor is the same quantity in tiers 1 and
     2 when the conditional means are linear: the share of the observations'
-    remaining generalized variance the candidate explains. The RV coefficient
-    is not (it is about a third of it here, with three features)."""
+    remaining generalized variance the candidate explains. The nonlinear
+    effect is a held-out lower bound whose tuning never sees the block it
+    predicts, so it reads below the in-sample value at this sample size (600
+    samples, three columns), but on its scale; the RV coefficient is not on
+    that scale (about a third of it here, with three features)."""
     from model_selection.statistics.conditional_independence import NonlinearResidualTest
     rng = np.random.default_rng(40)
     n = 600
@@ -238,7 +241,7 @@ def test_nonlinear_tier_magnitude_is_on_the_set_correlation_scale():
     res = test.run({"c": c}, o, z, 10, rng, np.arange(n), 0)
     effect, null_mean = test.magnitude(c, o, z, np.arange(n), 0, res.observed[0], res.null[:, 0])
     assert null_mean is None
-    assert abs(effect - set_r2) < 0.05  # cross-fitted, so slightly below the in-sample value
+    assert 0.6 * set_r2 < effect < set_r2 + 0.01
     assert res.observed[0] < 0.5 * set_r2
 
 
@@ -505,3 +508,132 @@ def test_the_linear_tier_holds_its_level_with_dominant_events():
         res = LinearResidualTest().run({"c": c}, o, z, 99, rng, np.arange(100), 0)
         rejections += (1 + np.sum(res.null[:, 0] >= res.observed[0])) / 100 < 0.05
     assert rejections / reps <= 0.08
+
+
+def test_the_nonlinear_effect_size_sees_contributions_that_are_not_monotone_in_the_candidate():
+    """The effect's direction is built from the candidate's residual kernel
+    features with coefficients that may vary with the state, so it recovers
+    a contribution that depends on the square of the candidate's own error,
+    which a direction linear in the candidate's residual cannot see; with no
+    contribution it is near zero. True shares: 0.453 and 0."""
+    from model_selection.statistics.conditional_independence import NonlinearResidualTest
+    rng = np.random.default_rng(3)
+    n = 1500
+    z = rng.uniform(-2, 2, size=n)
+    e1, e2 = rng.standard_normal(n), rng.standard_normal(n)
+    c = np.sin(2 * z) + e1
+    base = np.cos(1.5 * z) + 0.5 * z + e2
+    t = np.arange(n, dtype=float)
+    quadratic, _ = NonlinearResidualTest().magnitude(c, base + 0.7 * (e1 ** 2 - 1), z[:, None], t, 0, 0.0,
+                                                     np.zeros(1))
+    null, _ = NonlinearResidualTest().magnitude(c, base, z[:, None], t, 0, 0.0, np.zeros(1))
+    assert abs(quadratic - 0.453) < 0.06
+    assert 0.0 <= null < 0.01
+
+
+def test_the_effect_sizes_tuning_never_sees_the_block_it_predicts():
+    """With enough blocks, each block's bandwidth and penalty are chosen by
+    cross-validation within the other half of the record, so changing the
+    observations' residuals in one block cannot change which fit predicts
+    that block; with fewer blocks the tuning falls back to all blocks and
+    says so."""
+    import model_selection.statistics.conditional_independence.nonlinear as nl
+    from model_selection.statistics.regression.kernel_residuals import crossfit_blocks, _folds
+    rng = np.random.default_rng(5)
+    n = 400
+    X1, X2 = rng.normal(size=(n, 3)), rng.normal(size=(n, 6))
+    e = X2[:, :2] @ np.array([0.5, -0.5]) + rng.normal(size=n)
+    block, k, _ = crossfit_blocks(np.arange(n, dtype=float), 10.0)
+    folds, _ = _folds(block, k, 1)
+    assert len(folds) >= nl.MIN_SPLIT_BLOCKS
+    h, split = nl._ridge_direction(e, [X1, X2], folds)
+    assert split
+    # Perturb the first block's residuals: the first half's predictions are
+    # tuned in the second half and fitted without the first block, so they
+    # do not change.
+    first = folds[0][0]
+    e2 = e.copy()
+    e2[first] += 5.0 * rng.normal(size=first.size)
+    h2, _ = nl._ridge_direction(e2, [X1, X2], folds)
+    assert np.allclose(h2[first], h[first])
+    few, _ = _folds(*crossfit_blocks(np.arange(n, dtype=float), 80.0)[:2], 1)
+    assert len(few) < nl.MIN_SPLIT_BLOCKS
+    assert nl._ridge_direction(e, [X1, X2], few)[1] is False
+
+
+def test_fixed_b_draws_match_their_mean_and_kiefer_vogelsangs_critical_values():
+    """The fixed-b variance functional for the Bartlett kernel has mean
+    1 - b + b^2 / 3, and |Z| / sqrt(Q) has the two-sided 5% critical values
+    Kiefer and Vogelsang (2005) tabulate as 1.96 + 2.9694 b + 0.4160 b^2
+    - 0.5324 b^3. A 95% point from 20,000 draws varies by about 1%; the
+    tolerance allows for that."""
+    from model_selection.statistics.conditional_independence.multipliers import fixed_b_draws
+    rng = np.random.default_rng(13)
+    for b in (0.025, 0.1):
+        Q = fixed_b_draws(b, 20000, rng)
+        assert abs(Q.mean() - (1 - b + b * b / 3)) < 0.004
+        cv = np.quantile(np.abs(rng.standard_normal(Q.size)) / np.sqrt(Q), 0.95)
+        assert abs(cv / (1.96 + 2.9694 * b + 0.4160 * b ** 2 - 0.5324 * b ** 3) - 1) < 0.025
+    assert np.all(fixed_b_draws(None, 5, rng) == 1.0) and np.all(fixed_b_draws(0.0, 5, rng) == 1.0)
+
+
+def test_fixed_b_draws_at_one_step_on_a_long_record_are_cheap_and_near_one():
+    """A bandwidth of one step on a 20-year hourly record (b = 1/N) is
+    simulated on the record's own N points, not on 400 / b of them, with
+    bounded memory, and Q is then close to one."""
+    import time
+    from model_selection.statistics.conditional_independence.multipliers import fixed_b_draws
+    rng = np.random.default_rng(1)
+    t0 = time.time()
+    Q = fixed_b_draws(1 / 175_320, 200, rng, n_steps=175_320)
+    assert time.time() - t0 < 30
+    assert abs(Q.mean() - 1) < 0.001 and Q.std() < 0.01
+
+
+def test_width_draws_and_degrees_of_freedom_follow_the_fixed_b_draws():
+    from model_selection.statistics.conditional_independence.base import JointTestResult
+    from model_selection.statistics.conditional_independence.multipliers import fixed_b_draws
+    rng = np.random.default_rng(4)
+    b = 0.05
+    q = fixed_b_draws(b, 20000, rng)
+    undivided = rng.chisquare(1, size=q.size)
+    r = JointTestResult(["c"], np.array([1.0]), (undivided / q)[:, None], fixed_b=q)
+    assert np.isclose(r.width_draws(0).mean(), undivided.mean() / q.mean())
+    assert abs(r.null_degrees_of_freedom() * b / 1.5 - 1) < 0.1     # var(Q) ~ 4b/3, so nu ~ 1.5 / b
+    # Clusters: the number of clusters less one, whatever the restrictions (the tiers' statistics invert no
+    # variance matrix); the effective number of clusters is a diagnostic only.
+    units = JointTestResult(["c"], np.array([1.0]), undivided[:, None],
+                            diagnostics={"c": {"effective_clusters": 7.5}},
+                            dependence={"independent_units": True, "n_blocks": 12})
+    assert units.null_degrees_of_freedom(0, 1) == 11 and units.null_degrees_of_freedom(0, 9) == 11
+    assert np.all(units.width_draws(0) == undivided)
+
+
+def test_unrestricted_width_on_a_grid_is_not_widened_by_a_strong_effect():
+    """On a regular grid the width of the null from the unrestricted residuals
+    matches the test's own without an effect, and is not widened by a strong
+    one (LinearResidualTest.unrestricted_width_draws)."""
+    from scipy.signal import lfilter
+    from model_selection.statistics.power import effective_sample_size
+    n = 3000
+    test = LinearResidualTest()
+    pos = np.arange(n)
+
+    def ar(rng):
+        return lfilter([1], [1, -0.98], rng.normal(size=n)) * np.sqrt(1 - 0.98 ** 2)
+
+    out = {}
+    for label, rho2 in (("none", 0.0), ("strong", 0.8)):
+        rs, us = [], []
+        for i in range(6):
+            rng = np.random.default_rng(i)
+            z, c, e = ar(rng)[:, None], ar(rng), ar(rng)
+            o = np.sqrt(rho2) * c + np.sqrt(1 - rho2) * e
+            r = test.run({"c": c}, o, z, 199, rng, pos, 0, grid_step=1)
+            rs.append(effective_sample_size(n, r.width_draws(0), 1, 1, 1))
+            us.append(effective_sample_size(n, test.unrestricted_width_draws(c, o, z, 199, rng, pos, 0, grid_step=1),
+                                            1, 1, 1))
+        out[label] = (np.median(rs), np.median(us))
+    assert abs(out["none"][1] / out["none"][0] - 1) < 0.2
+    assert out["strong"][0] < 0.8 * out["strong"][1]
+    assert abs(out["strong"][1] / out["none"][1] - 1) < 0.2

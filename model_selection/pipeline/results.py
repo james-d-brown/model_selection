@@ -5,11 +5,9 @@ from dataclasses import dataclass, field
 
 from model_selection.io.basin import OBS_KEY
 from model_selection.event_detection.windows import ExpandedEvent
-from model_selection.selection.greedy import SelectionResult
-from model_selection.selection.config import DEFAULT_ADEQUACY_FLOOR
-from model_selection.statistics.power import describe_detectable, format_share
+from model_selection.selection.greedy import STEP_OUTCOMES, SelectionResult
 from model_selection.statistics.significance.block_length import (
-    MIN_ACF_N, MIN_BLOCKS, expected_variance_shortfall,
+    MIN_ACF_N, MIN_BLOCKS, SHORTFALL_TOLERANCE,
 )
 
 POOLED_RESULT_JSON_FILENAME_TEMPLATE = "{gage}_pooled_result.json"
@@ -101,7 +99,6 @@ class HighFlowResult:
     measure: str = "cmi"
     committed_tier: str | None = None
     attempted_tiers: list[dict] = field(default_factory=list)
-    detectable_r2: float | None = None
     meaningful_r2: float | None = None
     power_stop_reason: str | None = None
     adequacy_floor: float | None = None
@@ -151,16 +148,32 @@ def _dependence_flags(where: str, sources: list[tuple[str, dict | None]]) -> lis
                 "(docs/methods.md, Dependence between samples).")})
         if dep and dep.get("low_rank_material"):
             flags.append({"code": "low_rank_material", "message": (
-                f"{where}, {what}: a kernel factor reached the rank cap, and the cross-fitted residual sum of "
-                f"squares changed by {dep.get('low_rank_rank_change', 0.0):.2g} (relative) between half the "
-                "rank and the cap, so the effect size may still move by about twice that, as much as the "
-                "effect-size floor; raise SelectionConfig.nonlinear_rank (docs/methods.md, Nonlinear tier).")})
+                f"{where}, {what}: a kernel factor reached the rank cap, and between half the rank and the cap "
+                f"the cross-fitted residual sum of squares changed by {dep.get('low_rank_rank_change', 0.0):.2g} "
+                f"(relative) and the effect size by {dep.get('effect_half_rank_change', 0.0):.2g}, so the effect "
+                "size may still move by as much as the effect-size floor; raise SelectionConfig.nonlinear_rank "
+                "(docs/methods.md, Nonlinear tier).")})
+        if dep and dep.get("independent_units") and (
+                "cluster_draws_fitted_share" in dep or what.startswith("effect modification")):
+            flags.append({"code": "kernel_null_unsupported", "message": (
+                f"WARNING, {where}, {what}: this kernel test was run on {dep.get('n_blocks', 0):.0f} independent "
+                "clusters of events. Its null (the wild cluster restricted bootstrap with the observed fit's "
+                "tuning) is justified as the number of clusters grows; no published result fixes the level of a "
+                "kernel test with cross-fitted residuals at a given number of clusters, so at this number its "
+                "level rests on simulation, not on a theorem (docs/methods.md, Dependence between samples).")})
+        if dep and dep.get("cluster_draws_reproduce_statistic") is False:
+            flags.append({"code": "cluster_draws_mismatch", "message": (
+                f"{where}, {what}: the cluster bootstrap's draw with every sign +1 did not reproduce the observed "
+                "statistic, so the draws are not computed as the statistic is; the null is not valid for this test "
+                "(docs/methods.md, Dependence between samples).")})
         if dep and not dep.get("estimated") and dep.get("few_blocks") and dep.get("independent_units"):
             flags.append({"code": "few_blocks", "message": (
                 f"{where}, {what}: the events were resampled as {dep.get('n_blocks', 0):.0f} independent clusters "
-                f"of dependent events, fewer than the minimum of {MIN_BLOCKS} (a convention). With few clusters "
-                "the wild cluster bootstrap can reject too often (MacKinnon and Webb, 2017; docs/methods.md, "
-                "Dependence between samples).")})
+                f"of dependent events, fewer than the minimum of {MIN_BLOCKS} (a convention). The wild cluster "
+                "bootstrap's justification holds as the number of clusters grows; with few clusters, especially "
+                "of unequal size, it can reject too often, and no published result fixes its level there "
+                "(MacKinnon and Webb, 2017; Canay, Santos and Shaikh, 2021; docs/methods.md, Dependence between "
+                "samples).")})
         elif dep and not dep.get("estimated") and dep.get("few_blocks"):
             flags.append({"code": "few_blocks", "message": (
                 f"{where}, {what}: the samples are not on a regular time grid "
@@ -179,12 +192,14 @@ def _dependence_flags(where: str, sources: list[tuple[str, dict | None]]) -> lis
             continue
         if dep.get("few_blocks"):
             flags.append({"code": "few_blocks", "message": (
-                f"{where}, {what}: the block resampling rested on "
-                f"{dep.get('n_blocks', 0):.0f} blocks, fewer than the minimum of {MIN_BLOCKS} (a convention). "
-                "At the estimated block length the null's variance is then expected to be about "
-                f"{100 * expected_variance_shortfall(dep.get('n_blocks', 1)):.0f}% too small, so the test tends "
-                "to reject too often; the record is short for its dependence (docs/methods.md, Dependence "
-                "between samples).")})
+                f"{where}, {what}: the resampling's bandwidth of {dep.get('block_length')} time units, "
+                f"{dep.get('n_blocks', 0):.0f} bandwidths across the record, leaves out part of the dependence "
+                f"of the statistic's terms (persistence {dep.get('persistence', 0.0):.0f} time units). The "
+                "null's variance is then expected to be about "
+                f"{100 * (dep.get('expected_shortfall') or 0.0):.0f}% too small, at least the "
+                f"{100 * SHORTFALL_TOLERANCE:.0f}% tolerance (a convention), so the test tends to reject too "
+                "often; the record is short for its dependence (docs/methods.md, Dependence between "
+                "samples).")})
         if not dep.get("dependence_decays", True):
             flags.append({"code": "dependence_not_decaying", "message": (
                 f"{where}, {what}: the residual products remained significantly "
@@ -205,12 +220,22 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         seasonal cycle (the median calendar day has data in fewer than
         preprocessing.seasonal.MIN_YEARS years), so the pathway ran without
         conditioning on the time of year (docs/methods.md, Seasonality).
+    kernel_null_unsupported : a kernel test (the nonlinear tier's, or the
+        effect-modification check) ran on independent clusters of events,
+        where no published result fixes its level at a given number of
+        clusters; a warning. It is raised at any number of clusters until the
+        cluster check (scripts/diagnostics/cluster_null_check.py) has set the
+        smallest number at which the level holds.
+    cluster_draws_mismatch : the cluster bootstrap's draws did not reproduce
+        the observed statistic, so its null is not valid.
+    too_few_clusters : a round could not be tested: the event sample's
+        independent clusters are too few for the sign-flip null to give a
+        p-value below alpha (statistics.significance.clusters).
+    adequacy_check_untestable : an adequacy check that did not reject could
+        not have rejected at its level, for the same reason.
     untestable : the high-flow event sample has fewer than two usable events,
         or too many dimensions for its number of events for the test to be
         defined, so selection was not run.
-    meaningful_effect_undetectable : the data cannot detect contributions as
-        small as SelectionConfig.meaningful_r2 with 80% power (docs/methods.md,
-        Detectable effect and the meaningful-effect threshold).
     wasp_scale_range_too_short : high-flow event pathway with the WASP detector: a
         formulation's scale ceiling leaves too few smoothing scales to
         resolve any events (docs/methods.md, Event detection methods).
@@ -225,10 +250,12 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         (MIN_ACF_N); such a check can detect little, so the tier was kept
         for lack of evidence against it, not because its assumption was shown
         to hold.
-    few_blocks : in a step's test or check, the block resampling rested on
-        fewer than MIN_BLOCKS blocks (for event samples, their span divided by
-        the dependence lag) (a heuristic: the resampled null's spread
-        is then estimated imprecisely and the test tends to reject too often).
+    few_blocks : in a step's test or check, the resampled null's variance is
+        expected to fall short by at least SHORTFALL_TOLERANCE (a convention)
+        because the multipliers' bandwidth leaves out part of the dependence
+        (evenly spaced samples), or the resampling rested on fewer than
+        MIN_BLOCKS blocks or clusters (event samples, a convention); the test
+        then tends to reject too often.
     dependent_samples_permuted : in a step's CMI test, the samples exchanged
         by the local permutation were not indistinguishable from independent
         sampling (their decorrelation lag exceeded one sampling step).
@@ -262,17 +289,6 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         escalation the current tier's selection stands, possibly incomplete;
         after a validity escalation no selection is reported
         (docs/methods.md, Selection).
-    escalated_tier_undetectable : the committed tier was reached by
-        escalation, and the round at which it stopped (not accepting its best
-        candidate) could not detect a contribution as large as the margin
-        (meaningful-effect threshold, else the acceptance floor) with 80%
-        power: the stop reflects too few samples, not an absence of
-        information.
-
-    thinning_limits_detection : selection stopped in a tier that ran on a
-        subsample of the record (the pooled nonlinear and CMI tiers) at a
-        round whose smallest detectable R^2 exceeds the margin there but not
-        on the whole record (docs/methods.md, Dependence between samples).
     event_terms_correlated : in a step on high-flow events in clusters,
         the terms of the statistic were correlated between consecutive
         clusters (docs/methods.md, Dependence between samples).
@@ -332,36 +348,6 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
             extra = ("" if not attempt.get("committed") else
                      f" Selections made before the assumptions were rejected, for information only: {provisional}.")
             flags.append({"code": "escalation_unsupported", "message": f"{attempt['reason']}.{extra}"})
-    own_steps = [st for st in (sel.trajectory if sel is not None else []) if st.tier in (None, tier)]
-    margin = (result.meaningful_r2 if result.meaningful_r2 is not None
-              else sel.equivalence[0].get("margin") if sel is not None and sel.equivalence and sel.equivalence[0].get("margin")
-              else getattr(result, "adequacy_floor", None) or DEFAULT_ADEQUACY_FLOOR)
-    stop = own_steps[-1] if own_steps and not own_steps[-1].accepted else None
-    if (len(attempts) > 1 and attempts[-1].get("run", True) and stop is not None
-            and stop.detectable_r2 is not None and stop.detectable_r2 > margin):
-        flags.append({"code": "escalated_tier_undetectable", "message": (
-            f"selection stopped in the {tier} tier, reached by escalation, at a round that could not detect a "
-            f"contribution of the size that matters on its sample: its smallest detectable R^2 is "
-            f"{format_share(stop.detectable_r2)}, above the margin of {format_share(margin)} (the meaningful-effect "
-            f"threshold when set, otherwise the acceptance floor). The stop then reflects too few samples, not an "
-            f"absence of information. Selections discarded by a validity escalation, for information only: "
-            f"{provisional}.")})
-    thin = stop.thinning if stop is not None else None
-    if (thin is not None and stop.detectable_r2 is not None and stop.detectable_r2 > margin
-            and thin["detectable_r2_record"] <= margin):
-        retained = thin["information_retained"]
-        flags.append({"code": "thinning_limits_detection", "message": (
-            f"selection stopped in the {stop.tier} tier, which ran on {thin['n_samples']} of the record's "
-            f"{thin['n_samples_record']} samples: its smallest detectable R^2 there is "
-            f"{format_share(stop.detectable_r2)}, above the margin of {format_share(margin)}, while on the whole "
-            f"record it would be {format_share(thin['detectable_r2_record'])}, within it. The subsample keeps about "
-            + (f"{100 * retained:.0f}%" if retained is not None else "an unknown share")
-            + " of the record's effective samples. The stop then reflects the thinning, not an absence of "
-            "information. "
-            + ("A larger sample for the tier (SelectionConfig.nonlinear_max_n) may detect what this one cannot"
-               if stop.tier == "nonlinear" else
-               "The tier's samples are at least one dependence lag apart, at most SelectionConfig.cmi_max_n of them")
-            + " (docs/methods.md, Dependence between samples).")})
     if sel is not None:
         for i, step in enumerate(sel.trajectory, start=1):
             if step.low_samples_per_dimension:
@@ -377,6 +363,15 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
                 (a.get("check", "check"), a.get("dependence")) for a in step.adequacy]
             for a in step.adequacy:
                 dep = a.get("dependence") or {}
+                level = a.get("level", dep.get("level"))
+                if (a.get("adequate") and dep.get("smallest_p_value") is not None and level is not None
+                        and dep["smallest_p_value"] >= level):
+                    flags.append({"code": "adequacy_check_untestable", "message": (
+                        f"round {i} ({step.formulation}), {a.get('check', 'check')}: with "
+                        f"{dep.get('n_blocks', 0):.0f} independent clusters of events, the smallest p-value the "
+                        f"check can reach is {dep['smallest_p_value']:.3g}, not below its level of {level:.3g}, so "
+                        "it could not reject whatever the data; the tier was kept for lack of a test, not because "
+                        "its assumption was shown to hold (docs/methods.md, Dependence between samples).")})
                 if a.get("adequate") and dep.get("too_few_to_assess"):
                     flags.append({"code": "adequacy_check_too_few_samples", "message": (
                         f"round {i} ({step.formulation}), {a.get('check', 'check')}: the check ran on "
@@ -393,6 +388,11 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
                 [(f"{test['check']}, the test that led to the next tier"
                   + (f" (p={test['p_value']:.3g})" if test.get("p_value") is not None else ""),
                   test["dependence"])])
+    if sel is not None and sel.untestable:
+        flags.append({"code": "too_few_clusters", "message": (
+            f"selection could not test its next round: {sel.ill_posed_reason}. With one sign per independent "
+            "cluster, no test can then reach significance, so the data cannot resolve any further contribution "
+            "(docs/methods.md, Dependence between samples).")})
     if result.zero_flow_flag:
         flags.append({"code": "zero_flow", "message": "at least one series has a high fraction of zero flow."})
     if (getattr(result, "seasonal_conditioning", None) or {}).get("record_too_short"):
@@ -400,26 +400,10 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
             "the record is too short to describe the seasonal cycle (the median calendar day has data in fewer "
             "than three years), so the tests did not condition on the seasonal phase: a formulation can be "
             "credited with reproducing the seasonal cycle.")})
-    if isinstance(result, PooledResult) and result.meaningful_r2 is not None and sel is not None \
-            and sel.trajectory and sel.trajectory[0].detectable_r2 is not None \
-            and sel.trajectory[0].detectable_r2 > result.meaningful_r2:
-        detectable = sel.trajectory[0].detectable_r2
-        flags.append({"code": "meaningful_effect_undetectable", "message": (
-            f"the smallest contribution the record can detect with 80% power in round 1 (R^2 = {format_share(detectable)}) "
-            f"exceeds the meaningful threshold (R^2 = {format_share(result.meaningful_r2)}): formulations contributing at "
-            "the meaningful level would usually go unselected, and the effect sizes of accepted formulations "
-            "are likely overestimated.")})
     if isinstance(result, HighFlowResult):
         if result.power_stop_reason:
             flags.append({"code": "untestable", "message": (
                 f"high-flow selection not run: {result.power_stop_reason}")})
-        elif (result.meaningful_r2 is not None and result.detectable_r2 is not None
-              and result.detectable_r2 > result.meaningful_r2):
-            flags.append({"code": "meaningful_effect_undetectable", "message": (
-                f"the smallest contribution these events can detect with 80% power (R^2 = {format_share(result.detectable_r2)}) "
-                f"exceeds the meaningful threshold (R^2 = {format_share(result.meaningful_r2)}): formulations contributing at "
-                "the meaningful level would usually go unselected, and the effect sizes of accepted formulations "
-                "are likely overestimated.")})
         unresolved = sorted(name for name, meta in (result.wasp_metadata or {}).items()
                             if name != OBS_KEY and meta.get("scale_range_too_short"))
         if unresolved:
@@ -446,7 +430,7 @@ def _review_header(result) -> dict:
 
 def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> dict:
     keys = ("selected", "trajectory", "unconditional_association", "unconditional_effect", "stopped_reason", "ill_posed",
-            "ill_posed_reason", "equivalence", "equivalent_sets", "equivalent_sets_summary", "escalated_from")
+            "ill_posed_reason", "untestable", "equivalence", "equivalent_sets", "equivalent_sets_summary", "classes")
     if sel is None:
         return {k: None for k in keys}
     return {
@@ -464,18 +448,17 @@ def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> di
                 "dependence_lag": st.dependence_lag,
                 "block_length": st.block_length,
                 "dependence": st.dependence,
-                "null_mean": st.null_mean, "null_std": st.null_std,
+                "null_mean": st.null_mean, "null_std": st.null_std, "null_width_mean": st.null_width_mean,
                 "diagnostics": st.diagnostics,
                 "adequacy": st.adequacy,
                 "other_candidates_checked": st.other_candidates_checked,
                 "cmi_calibration": st.cmi_calibration,
                 "samples_per_dimension": st.samples_per_dimension,
                 "low_samples_per_dimension": st.low_samples_per_dimension,
-                "detectable_r2": st.detectable_r2,
                 "effective_sample_size": st.effective_sample_size,
+                "outcome": st.outcome,
+                "outcome_meaning": STEP_OUTCOMES.get(st.outcome) if st.outcome else None,
                 "thinning": st.thinning,
-                "detectability": (describe_detectable(st.detectable_r2, n_features)
-                                  if st.detectable_r2 is not None else None),
             }
             for st in sel.trajectory
         ],
@@ -484,10 +467,11 @@ def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> di
         "stopped_reason": sel.stopped_reason,
         "ill_posed": sel.ill_posed,
         "ill_posed_reason": sel.ill_posed_reason,
+        "untestable": sel.untestable,
         "equivalence": sel.equivalence,
         "equivalent_sets": sel.equivalent_sets,
         "equivalent_sets_summary": sel.equivalent_sets_summary,
-        "escalated_from": sel.escalated_from,
+        "classes": sel.classes,
     }
 
 
@@ -520,8 +504,6 @@ def pooled_result_to_dict(result: PooledResult) -> dict:
         "censoring": result.censoring,
         "ill_posed": sel.ill_posed,
         "ill_posed_reason": sel.ill_posed_reason,
-        "detectability": (describe_detectable(sel.trajectory[0].detectable_r2)
-                          if sel.trajectory and sel.trajectory[0].detectable_r2 is not None else None),
     }
     d.update({f"pooled_{k}": v for k, v in selection_to_records(sel).items()})
     return d
@@ -572,9 +554,6 @@ def high_flow_result_to_dict(result: HighFlowResult) -> dict:
         "fpca_reconstruction_fidelity": result.fpca_reconstruction_fidelity,
         "peak_phase_spread": result.peak_phase_spread,
         "requires_closer_inspection": result.requires_closer_inspection,
-        "detectable_r2": result.detectable_r2,
-        "detectability": (describe_detectable(result.detectable_r2, result.n_components)
-                          if result.detectable_r2 is not None else None),
         "meaningful_r2": result.meaningful_r2,
         "power_stop_reason": result.power_stop_reason,
         "ensemble_representation": result.ensemble_representation,
@@ -616,9 +595,9 @@ def basin_result_to_dict(result: BasinResult) -> dict:
 
 
 def _pathway_outcome(label: str, result) -> str:
-    """One clause: the selected set, whether any selected formulation could
-    be replaced, and the largest further contribution that would go
-    undetected."""
+    """One clause: the selected set and the class of each selected
+    formulation, with its exchangeable candidates (docs/methods.md, Appendix
+    B, Reporting of interchangeable formulations)."""
     sel = result.selection if result is not None else None
     if sel is None:
         reason = getattr(result, "power_stop_reason", None) if result is not None else None
@@ -627,34 +606,26 @@ def _pathway_outcome(label: str, result) -> str:
     if not selected:
         return f"{label}: nothing selected"
     text = f"{label} {{{', '.join(selected)}}}"
-    if sel.equivalence:
-        swaps, better = [], []
-        for rec in sel.equivalence:
-            for c in rec["comparisons"]:
-                if c["relation"] in ("equivalent", "not_distinguishable"):
-                    kind = "equivalent" if c["relation"] == "equivalent" else "not distinguishable"
-                    swaps.append(f"{rec['selected']} by {c['candidate']} ({kind})")
-                elif c["relation"] == "encompasses_selected":
-                    better.append(f"{c['candidate']} may be better than {rec['selected']}")
-        text += ": " + ("replaceable " + "; ".join(swaps) if swaps else "none replaceable")
-        if better:
-            text += "; " + "; ".join(better)
-    last = sel.trajectory[-1]
-    if not last.accepted and last.detectable_r2 is not None:
-        text += f"; further contributions below R^2 = {format_share(last.detectable_r2)} undetectable"
-        prior = sel.escalated_from
-        if prior and prior.get("detectable_r2") is not None:
-            text += f" (below {format_share(prior['detectable_r2'])} in the {prior['tier']} tier, before escalation)"
+    classes = sel.classes
+    if classes is not None:
+        clauses = []
+        for w in selected:
+            if w in classes["exchangeable"]:
+                clauses.append(f"{w} exchangeable with {', '.join(classes['exchangeable'][w])}")
+            elif w in classes["distinct"]:
+                clauses.append(f"{w} distinct")
+            elif w in classes["not_shown_distinct"]:
+                clauses.append(f"{w} not shown to be distinct")
+        text += ": " + "; ".join(clauses)
     return text
 
 
 def outcome_line(pooled: "PooledResult | None" = None, high_flow: "HighFlowResult | None" = None,
                  pooled_censored: "PooledResult | None" = None) -> str:
     """The outcome of a basin's selection in one line: for each pathway run,
-    the selected set, whether any selected formulation could be replaced by
-    another (docs/methods.md, Interchangeable formulations), and the largest
-    further contribution that would go undetected; with more than one run,
-    the union of their selected sets. pooled_censored is a pooled run with
+    the selected set and the class of each selected formulation, with its
+    exchangeable candidates (docs/methods.md, Interchangeable formulations);
+    with more than one run, the union of their selected sets. pooled_censored is a pooled run with
     censoring at high flow; a censored result passed as pooled is labelled
     as censored too."""
     gage = (pooled or high_flow or pooled_censored).gage
