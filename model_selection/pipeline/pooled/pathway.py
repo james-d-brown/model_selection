@@ -47,7 +47,7 @@ from model_selection.pipeline.shared import (
     pearson_with_observations, resolve_rng, write_dependence_plot, zero_flow_check,
 )
 from model_selection.preprocessing.censoring import CensoredSeries, Censoring
-from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal, seasonal_phase
+from model_selection.preprocessing.seasonal import SeasonalConfig, resolve_seasonal, seasonal_phase, water_year_starts
 from model_selection.preprocessing.transforms import dependence_series, prepare_series
 from model_selection.selection.tiers import SelectionSample
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
@@ -155,17 +155,20 @@ def run_pooled_analysis(
 
     phase = seasonal_phase(basin.obs.index)[rows] if seasonal.enabled else None
     covariate_label = "the seasonal phase" if phase is not None else None
+    # The time positions are positions in the record, so the water-year starts are too.
+    period_starts = water_year_starts(basin.obs.index)
     censoring_record = None
     if censoring is None:
         sample = SelectionSample({name: v[rows] for name, v in candidates_t.items()}, obs_t[rows], rows,
-                                 min_temporal_lag, grid_step=1, covariates=phase, covariate_label=covariate_label)
+                                 min_temporal_lag, grid_step=1, covariates=phase, covariate_label=covariate_label,
+                                 period_starts=period_starts)
     else:
         # The candidate and the observations are censored; the selected
         # formulations enter the conditioning set uncensored, as prepared above,
         # with the seasonal phase (docs/methods.md, Censoring at high flow).
         censored_candidates, censored_obs, censored = _censored_series(basin, rows, censoring)
         sample = SelectionSample(censored_candidates, censored_obs, rows, min_temporal_lag, grid_step=1,
-                                 covariates=phase, covariate_label=covariate_label,
+                                 covariates=phase, covariate_label=covariate_label, period_starts=period_starts,
                                  conditioning={name: v[rows] for name, v in candidates_t.items()},
                                  censored=censored)
         shares = censored.shares_at_threshold(censored_candidates, censored_obs)

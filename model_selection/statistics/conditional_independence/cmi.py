@@ -168,7 +168,8 @@ class CMITest(ConditionalIndependenceTest):
                 return obs_value, np.array(null), exceedances / len(null)
         return obs_value, np.array(null), (hits + 1) / (max_resamples + 1)
 
-    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None,
+            period_starts=None):
         candidates, conditioning, names, n, k, estimator, observed, block, dependence, permute = self._setup(
             candidates, obs, conditioning, rng, time_positions, dependence_lag, grid_step)
         null = np.empty((n_resamples, len(names)))

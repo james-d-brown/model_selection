@@ -24,7 +24,8 @@ class StubTest(ConditionalIndependenceTest):
         self.null_scale = null_scale
         self.calls = []
 
-    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None,
+            period_starts=None):
         names = list(candidates)
         self.calls.append((names, None if conditioning is None else conditioning.shape))
         observed = np.array([self.effects[nm] for nm in names])
@@ -291,7 +292,8 @@ def test_an_escalation_to_an_uncalibrated_tier_marks_the_next_tier_unsupported()
     sample = _sample(names=("a", "b", "c", "d"))
     guard_seen = []
 
-    def guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None):
+    def guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
+                  period_starts=None):
         guard_seen.append(candidate)
         return _calibration(False, [])(candidate, obs, conditioning, time_positions, dependence_lag, rng)
 
@@ -318,7 +320,8 @@ def test_sample_covariates_are_conditioned_on_from_round_one():
 
 
 def _calibration(calibrated, calls):
-    def calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None):
+    def calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
+                  period_starts=None):
         calls.append(1)
         return {"n_surrogates": 52, "false_acceptances": 1 if calibrated else 20,
                 "false_acceptance_rate": 0.02 if calibrated else 0.38, "p_value": 0.9 if calibrated else 1e-9,
@@ -374,11 +377,12 @@ class _EffectStub(StubTest):
         self.sizes = sizes
 
     def magnitude(self, candidate, obs, conditioning, time_positions, dependence_lag, observed, null_draws,
-                  grid_step=None):
+                  grid_step=None, period_starts=None):
         name = next(nm for nm, v in self._values.items() if v is candidate)
         return self.sizes[name], None
 
-    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None,
+            period_starts=None):
         self._values = candidates
         return super().run(candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag)
 

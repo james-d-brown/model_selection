@@ -252,7 +252,8 @@ class LinearResidualTest(ConditionalIndependenceTest):
             draws = draws / float(np.mean(q))
         return draws
 
-    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None,
+            period_starts=None):
         names = list(candidates)
         n = as2d(obs).shape[0]
         # Each candidate's conditioning set: with censoring, the censored means
@@ -351,7 +352,7 @@ class LinearResidualTest(ConditionalIndependenceTest):
                                fixed_b=None if resolved.bandwidth_fraction is None else q)
 
     def magnitude(self, candidate, obs, conditioning, time_positions, dependence_lag, observed, null_draws,
-                  grid_step=None):
+                  grid_step=None, period_starts=None):
         """1 - Wilks' lambda of the residuals, less its chance level for the
         number of independent samples whose null matches the candidate's own
         null draws of Pillai's trace (chance_level). The null draws are not

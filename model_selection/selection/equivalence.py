@@ -91,7 +91,7 @@ def _relation(forward: dict, reverse: dict) -> str:
 
 
 def _adds(tier: Tier, name: str, values, obs, z, n_permutations, rng, time_positions, lag, grid_step,
-          alpha) -> dict:
+          alpha, period_starts=None) -> dict:
     """Whether one candidate passes the tier's gates given z (its own null,
     no adjustment across candidates)."""
     untestable = False
@@ -101,7 +101,7 @@ def _adds(tier: Tier, name: str, values, obs, z, n_permutations, rng, time_posit
             stopping_exceedances(alpha, n_permutations), grid_step=grid_step)
     else:
         result = tier.test.run({name: values}, obs, z, n_permutations, rng, time_positions, lag,
-                               grid_step=grid_step)
+                               grid_step=grid_step, period_starts=period_starts)
         observed, null = float(result.observed[0]), result.null[:, 0]
         p_value = permutation_p_value(observed, null)
         null = result.width_draws(0)  # for the effect size's chance level
@@ -113,7 +113,8 @@ def _adds(tier: Tier, name: str, values, obs, z, n_permutations, rng, time_posit
             untestable = smallest is not None and smallest >= alpha
     effect = float("nan")
     if p_value < alpha:  # the effect matters only for a significant candidate
-        effect, _ = tier.test.magnitude(values, obs, z, time_positions, lag, observed, null, grid_step=grid_step)
+        effect, _ = tier.test.magnitude(values, obs, z, time_positions, lag, observed, null, grid_step=grid_step,
+                                        period_starts=period_starts)
     return {"p_value": float(p_value), "effect": float(effect),
             "adds": bool(p_value < alpha and effect >= tier.effect_size_floor and not untestable),
             "untestable": bool(untestable)}
@@ -136,13 +137,14 @@ class _Context:
         self.n = n
         self.time_positions = sample.time_positions if sample.time_positions is not None else np.arange(n)
         self.lag, self.grid_step = sample.dependence_lag, sample.grid_step
+        self.period_starts = sample.period_starts
 
     def z(self, names: list[str]):
         return _stack_selected(self.sample.conditioning_series, names, self.sample.covariates)
 
     def adds(self, name, values, z, n_permutations, rng, alpha) -> dict:
         return _adds(self.tier, name, values, self.obs, z, n_permutations, rng, self.time_positions, self.lag,
-                     self.grid_step, alpha)
+                     self.grid_step, alpha, self.period_starts)
 
 
 def _contexts(sample: SelectionSample, tier: Tier, tiers: TierContexts | None):

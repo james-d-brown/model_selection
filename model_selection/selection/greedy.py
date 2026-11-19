@@ -55,9 +55,9 @@ def _with_effect_diagnostics(dependence: dict | None, test, candidate, effect_si
     low-rank approximation is material when the residual sums of squares may
     still change by a fraction eps with rank (rank_change): the effect size, one
     minus a ratio of them, may then move by about 2 eps, which is material
-    when that reaches the effect-size floor. The effect size's own direction
-    is also refitted at half its factor's rank; a change of the floor or more
-    is material. A capped feature factor is material whenever it occurs."""
+    when that reaches the effect-size floor. When the effect size's own
+    factor reached the cap, its direction is also refitted at half the rank;
+    a change of the floor or more is material. A capped feature factor is material whenever it occurs."""
     if dependence is None:
         return None
     out = dict(dependence)
@@ -348,7 +348,7 @@ def greedy_forward_selection(
         logger.info(f"[*] Round {round_no} ({tier.name} tier): testing {len(remaining)} candidates "
                     f"with {n_permutations} resamples.")
         result = tier.test.run({c: candidates[c] for c in remaining}, obs, z, n_permutations, rng,
-                               time_positions, lag, grid_step=sample.grid_step)
+                               time_positions, lag, grid_step=sample.grid_step, period_starts=sample.period_starts)
         smallest = (result.dependence or {}).get("smallest_p_value")
         if smallest is not None and smallest >= alpha:
             # Too few independent units (clusters of events) for the sign-flip
@@ -385,10 +385,12 @@ def greedy_forward_selection(
         def effect_of(nm):
             k = result.index(nm)
             return tier.test.magnitude(candidates[nm], obs, z, time_positions, lag, float(result.observed[k]),
-                                       result.width_draws(k), grid_step=sample.grid_step)
+                                       result.width_draws(k), grid_step=sample.grid_step,
+                                       period_starts=sample.period_starts)
         if hasattr(tier.test, "magnitudes"):
             # The test pools the eigendecompositions of all these effect sizes (nonlinear tier).
-            effects = tier.test.magnitudes({nm: candidates[nm] for nm in ranked}, obs, z, time_positions, lag)
+            effects = tier.test.magnitudes({nm: candidates[nm] for nm in ranked}, obs, z, time_positions, lag,
+                                           period_starts=sample.period_starts)
         else:
             effects = dict(zip(ranked, parallel_map(effect_of, ranked)))
         if round_no == 1:
@@ -475,7 +477,8 @@ def greedy_forward_selection(
         if accepted and tier.calibration is not None and z is not None:
             source, censor = sample.surrogate_source(winner)
             calibration = tier.calibration(source, obs, z, time_positions, lag, rng.spawn(1)[0],
-                                           grid_step=sample.grid_step, **_censor_kwarg(censor))
+                                           grid_step=sample.grid_step, period_starts=sample.period_starts,
+                                           **_censor_kwarg(censor))
             accepted = calibration["calibrated"]
         n_dims = as2d(winner_values).shape[1] + as2d(obs).shape[1] + (0 if z is None else z.shape[1]) + k_partialled
         samples_per_dimension = n / n_dims
@@ -607,7 +610,7 @@ def greedy_forward_selection(
                     source, censor = sample.surrogate_source(nm)
                     step.cmi_calibration = tier.escalation_guard(
                         source, obs, z, time_positions, lag, rng.spawn(1)[0], grid_step=sample.grid_step,
-                        names=(nm, list(selected)), **_censor_kwarg(censor))
+                        period_starts=sample.period_starts, names=(nm, list(selected)), **_censor_kwarg(censor))
                     if not step.cmi_calibration["calibrated"]:
                         unsupported = (f"the CMI tier, to which the departure leads, is not calibrated on its "
                                        f"sample ({_calibration_summary(step.cmi_calibration)})")

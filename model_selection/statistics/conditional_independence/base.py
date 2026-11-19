@@ -86,7 +86,10 @@ class ConditionalIndependenceTest(ABC):
     same samples, the samples' time positions and the dependence lag in time
     units. grid_step is the step of the regular time grid the samples lie
     on, with missing points allowed (timestep samples); None for samples not
-    on a grid (event samples).
+    on a grid (event samples). period_starts are the time positions at which
+    each water year begins, which a test that cross-fits uses for its blocks
+    (statistics.regression.kernel_residuals.crossfit_blocks); None for blocks
+    of equal span. Tests that do not cross-fit ignore it.
     """
     name: str = ""
 
@@ -101,6 +104,7 @@ class ConditionalIndependenceTest(ABC):
             time_positions: np.ndarray,
             dependence_lag: float,
             grid_step: float | None = None,
+            period_starts: np.ndarray | None = None,
     ) -> JointTestResult:
         ...
 
@@ -114,6 +118,7 @@ class ConditionalIndependenceTest(ABC):
             observed: float,
             null_draws: np.ndarray,
             grid_step: float | None = None,
+            period_starts: np.ndarray | None = None,
     ) -> tuple[float, float | None]:
         """The candidate's effect size on the scale of the effect-size floor,
         and the null mean subtracted from it (None when none is).

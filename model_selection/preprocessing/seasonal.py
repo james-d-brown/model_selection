@@ -33,6 +33,28 @@ MIN_YEARS = 3
 """Fewest years in which the median calendar day must have data for the
 seasonal cycle to be described (a convention)."""
 
+WATER_YEAR_START_MONTH = 10
+"""Month in which the water year begins: 1 October to 30 September, the
+convention of the United States Geological Survey, whose records the
+framework uses."""
+
+
+def water_year(index: pd.DatetimeIndex) -> np.ndarray:
+    """The water year of each timestamp, named by the calendar year in which
+    it ends."""
+    index = pd.DatetimeIndex(index)
+    return index.year.to_numpy() + (index.month.to_numpy() >= WATER_YEAR_START_MONTH)
+
+
+def water_year_starts(index: pd.DatetimeIndex) -> np.ndarray:
+    """Positions in `index` at which a later water year begins (the first
+    timestamp of each water year after the first): the time positions that
+    the cross-fitting blocks use (statistics.regression.kernel_residuals
+    .crossfit_blocks), on a record whose time positions are positions in
+    `index`."""
+    wy = water_year(index)
+    return np.flatnonzero(np.diff(wy) != 0) + 1
+
 @dataclass
 class SeasonalConfig:
     """Conditioning on the time of year in the pooled pathway.
@@ -68,13 +90,28 @@ def _weighted_ridge(K: np.ndarray, count: np.ndarray, mean: np.ndarray, penaltie
     return [w * (Q @ (g / (e + lam))) for lam in penalties]
 
 
+def _tuning_fit_rows(year: np.ndarray, held_out: int) -> np.ndarray:
+    """The samples of the fit that predicts water year `held_out` in the
+    seasonal adjustment's cross-validation (phase_residuals): every water
+    year but it and its two neighbours, or, when that leaves fewer than two
+    water years, every water year but it."""
+    rows = ~np.isin(year, (held_out - 1, held_out, held_out + 1))
+    if np.unique(year[rows]).size < 2:
+        rows = year != held_out
+    return rows
+
+
 def phase_residuals(values: np.ndarray, index: pd.DatetimeIndex) -> np.ndarray:
     """`values` minus their kernel ridge regression on the seasonal phase,
     fitted to the whole record. The kernel, its bandwidths (multiples of the
     median distance between the standardized phases) and the penalties are
     those of the tests' regressions (statistics.regression.kernel_residuals);
     the bandwidth and penalty are chosen by cross-validation leaving out one
-    calendar year at a time, so that every fit sees the whole seasonal cycle.
+    water year at a time (WATER_YEAR_START_MONTH), so that every fit sees the
+    whole seasonal cycle. Each fit also leaves out the two neighbouring water
+    years, whose days next to the held-out year are dependent on it, as the
+    tests' cross-fitting does; when that would leave fewer than two water
+    years to fit, it keeps them.
     With 365 distinct phases, kernel ridge on the samples equals kernel ridge
     on the observed calendar days with each day's sample count as its
     weight. The final fit is not cross-fitted: fits to different parts of
@@ -89,7 +126,7 @@ def phase_residuals(values: np.ndarray, index: pd.DatetimeIndex) -> np.ndarray:
     if not ok.any():
         return out
     index = pd.DatetimeIndex(index)
-    v, day, year = values[ok], calendar_day(index)[ok], index.year.to_numpy()[ok]
+    v, day, year = values[ok], calendar_day(index)[ok], water_year(index)[ok]
     phase = seasonal_phase(index)[ok]
     centre, scale = phase.mean(axis=0), phase.std(axis=0)
     scale = np.where(scale > 0, scale, 1.0)
@@ -117,7 +154,7 @@ def phase_residuals(values: np.ndarray, index: pd.DatetimeIndex) -> np.ndarray:
             err = np.zeros(len(RIDGE_PENALTIES))
             for y in years:
                 held = year == y
-                for j, curve in enumerate(fit(K, ~held, RIDGE_PENALTIES)):
+                for j, curve in enumerate(fit(K, _tuning_fit_rows(year, y), RIDGE_PENALTIES)):
                     err[j] += float(np.sum((v[held] - curve[day[held]]) ** 2))
             j = int(np.argmin(err))
             if err[j] < best:

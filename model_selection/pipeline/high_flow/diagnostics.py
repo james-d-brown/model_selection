@@ -81,6 +81,7 @@ def basis_sensitivity_check(
         reconstruction_by_series: dict,
         rng: np.random.Generator,
         registration: np.ndarray | None = None,
+        period_starts: np.ndarray | None = None,
 ) -> dict | None:
     """Whether the decision that stopped selection depends on the FPCA basis.
 
@@ -122,14 +123,16 @@ def basis_sensitivity_check(
             # As in the selection: the linear tier removes the registration from every series first.
             from model_selection.selection.tiers import SelectionSample, partial_out_covariates
             residual = partial_out_covariates(SelectionSample(candidate_events, obs_features, time_positions,
-                                                              dependence_lag, covariates=registration))
+                                                              dependence_lag, covariates=registration,
+                                                              period_starts=period_starts))
             candidate_events, obs_features = residual.candidates, residual.obs
             z = np.hstack([candidate_events[s] for s in already_selected]) if already_selected else None
         result = tier.test.run({c: candidate_events[c] for c in remaining}, obs_features, z, n_permutations,
-                               rng, time_positions, dependence_lag)
+                               rng, time_positions, dependence_lag, period_starts=period_starts)
         w = result.index(result.winner)
         effect, _ = tier.test.magnitude(candidate_events[result.winner], obs_features, z, time_positions,
-                                        dependence_lag, float(result.observed[w]), result.width_draws(w))
+                                        dependence_lag, float(result.observed[w]), result.width_draws(w),
+                                        period_starts=period_starts)
         accepted, p_value, bias_corrected = gate(float(result.observed[w]), result.null[:, w],
                                                  result.null.max(axis=1), level, tier.effect_size_floor,
                                                  effect=effect)

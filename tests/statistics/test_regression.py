@@ -83,6 +83,56 @@ def test_crossfit_blocks_are_at_least_one_dependence_lag_long():
     assert np.all(np.diff(block) >= 0) and np.bincount(block).min() >= 99
 
 
+def test_crossfit_blocks_are_whole_water_years_at_least_one_lag_long():
+    import pandas as pd
+    from model_selection.preprocessing.seasonal import water_year_starts
+    from model_selection.statistics.regression.kernel_residuals import crossfit_blocks
+    index = pd.date_range("2000-01-01", "2019-12-31 23:00", freq="h")   # 20 calendar years
+    t, starts = np.arange(len(index), dtype=float), water_year_starts(index)
+    for lag, k_expected in ((2500, 20), (7000, 19), (12000, 10)):
+        block, k, short = crossfit_blocks(t, lag, starts)
+        assert (k, short) == (k_expected, False)
+        assert np.all(np.diff(block) >= 0) and np.bincount(block).min() >= lag
+        boundaries = index[np.flatnonzero(np.diff(block)) + 1]
+        assert all((d.month, d.day, d.hour) == (10, 1, 0) for d in boundaries)
+    # The partial first water year (January to September, 6,552 hours) is a block when it spans the
+    # lag; the partial last one (October to December, 2,208 hours) joins the year before.
+    block, _, _ = crossfit_blocks(t, 2500, starts)
+    assert index[np.flatnonzero(np.diff(block))[0] + 1] == pd.Timestamp("2000-10-01")
+    assert index[np.flatnonzero(np.diff(block))[-1] + 1] == pd.Timestamp("2018-10-01")
+
+
+def test_crossfit_blocks_keep_their_water_years_on_a_subsample_of_the_rows():
+    import pandas as pd
+    from model_selection.preprocessing.seasonal import water_year_starts
+    from model_selection.statistics.regression.kernel_residuals import crossfit_blocks
+    index = pd.date_range("2000-01-01", "2019-12-31 23:00", freq="h")
+    t, starts = np.arange(len(index), dtype=float), water_year_starts(index)
+    rows = np.sort(np.random.default_rng(0).choice(len(index), 16000, replace=False))
+    full, k, _ = crossfit_blocks(t, 2500, starts)
+    sub, k_sub, _ = crossfit_blocks(t[rows], 2500, starts)
+    assert k_sub == k and np.array_equal(sub, full[rows])
+
+
+def test_crossfit_blocks_fall_back_to_equal_spans_when_water_years_are_too_few():
+    import pandas as pd
+    from model_selection.preprocessing.seasonal import water_year_starts
+    from model_selection.statistics.regression.kernel_residuals import crossfit_blocks
+    index = pd.date_range("2000-01-01", "2002-12-31", freq="h")        # 3 blocks of water years
+    t = np.arange(len(index), dtype=float)
+    assert crossfit_blocks(t, 2500, water_year_starts(index))[1:] == crossfit_blocks(t, 2500)[1:]
+
+
+def test_shared_regressions_with_different_blocks_are_kept_apart():
+    from model_selection.statistics.regression.kernel_residuals import shared_regression
+    rng = np.random.default_rng(3)
+    Z, t = rng.normal(size=(400, 1)), np.arange(400, dtype=float)
+    by_years = shared_regression(Z, t, 5.0, period_starts=np.arange(40.0, 400.0, 40.0))
+    equal = shared_regression(Z, t, 5.0)
+    assert by_years is not equal and by_years.n_blocks == 10 and equal.n_blocks == 20
+    assert shared_regression(Z, t, 5.0, period_starts=np.arange(40.0, 400.0, 40.0)) is by_years
+
+
 def test_out_of_fold_residuals_reflect_fit():
     rng = np.random.default_rng(2)
     z = rng.normal(size=(150, 1))

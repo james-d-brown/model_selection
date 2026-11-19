@@ -88,6 +88,22 @@ def _peak(ev) -> int:
     return ev.peak_index if ev.peak_index is not None else ev.start
 
 
+def event_period_starts(all_events: list, retained_ids: list, time_positions: np.ndarray,
+                        clusters: np.ndarray | None, index: pd.DatetimeIndex) -> np.ndarray:
+    """The water-year starts in the events' time positions (event_dependence),
+    for the cross-fitting blocks: positions in the basin's record when the
+    positions are the events' peaks, cluster coordinates when the events are
+    clustered (statistics.significance.clusters.cluster_period_starts)."""
+    from model_selection.preprocessing.seasonal import water_year_starts
+    starts = water_year_starts(index)
+    if clusters is None:
+        return starts
+    from model_selection.statistics.significance.clusters import cluster_period_starts
+    by_id = {ev.event_id: ev for ev in all_events}
+    peaks = np.array([_peak(by_id[eid]) for eid in retained_ids])
+    return cluster_period_starts(time_positions, peaks, starts)
+
+
 def event_dependence(rule: str, all_events: list, retained_ids: list, dependence_lag: int,
                      step_hours: float) -> tuple[np.ndarray, int, np.ndarray | None, dict]:
     """(time positions, dependence lag, cluster labels or None, record) of the
@@ -418,6 +434,8 @@ def run_high_flow_analysis(
                 step_hours = (basin.obs.index[1] - basin.obs.index[0]) / pd.Timedelta(hours=1)
                 time_positions, test_lag, clusters, dependence_record = event_dependence(
                     events.dependence, all_events, retained_event_ids, min_temporal_lag, step_hours)
+                period_starts = event_period_starts(all_events, retained_event_ids, time_positions, clusters,
+                                                    basin.obs.index)
                 if clusters is not None:
                     notes.append(
                         f"dependence between events ({events.dependence}): {dependence_record['n_clusters']} clusters "
@@ -450,6 +468,7 @@ def run_high_flow_analysis(
                 feature_names = tuple(f"PC{c + 1}" for c in range(n_components))
                 sample = SelectionSample(candidate_events, obs_features, time_positions, test_lag,
                                          feature_names=feature_names, covariates=registration, clusters=clusters,
+                                         period_starts=period_starts,
                                          covariate_label="the registration parameters (window length and peak "
                                                          "position)")
                 # The linear tier works on the partially linear model: the registration parameters are removed
@@ -474,7 +493,7 @@ def run_high_flow_analysis(
 
                 sensitivity = diagnostics.basis_sensitivity_check(
                     raw_formulations, obs_values, expanded_events, retained_event_ids,
-                    result_selection, time_positions, tier=outcome.tier,
+                    result_selection, time_positions, tier=outcome.tier, period_starts=period_starts,
                     n_permutations=selection.resolved_n_permutations, alpha=selection.alpha,
                     dependence_lag=test_lag, n_components=n_components, fpca_config=fpca,
                     reconstruction_by_series=fidelity_by_series, rng=rng,

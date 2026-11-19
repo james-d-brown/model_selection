@@ -103,6 +103,11 @@ class SelectionSample:
         on a subsample of it (the pooled pathway's nonlinear and CMI tiers),
         so that the information lost by thinning can be measured; None
         otherwise.
+    period_starts : the time positions at which each water year begins, for
+        the cross-fitting blocks of the tests' regressions
+        (statistics.regression.kernel_residuals.crossfit_blocks); None for
+        blocks of equal span. They describe the time axis, not the rows, so a
+        subsample of the rows keeps them unchanged.
     """
     candidates: dict[str, np.ndarray]
     obs: np.ndarray
@@ -118,6 +123,7 @@ class SelectionSample:
     conditioning: dict[str, np.ndarray] | None = None
     censored: CensoredSeries | None = None
     thinned_from: "SelectionSample | None" = field(default=None, compare=False, repr=False)
+    period_starts: np.ndarray | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         if self.conditioning is not None and set(self.conditioning) != set(self.candidates):
@@ -189,7 +195,8 @@ def partial_out_covariates(sample: SelectionSample) -> SelectionSample:
     from dataclasses import replace
     from model_selection.statistics.regression.kernel_residuals import ConditioningRegression
     V = as2d(np.asarray(sample.covariates, dtype=float))
-    reg = ConditioningRegression(V, sample.time_positions, buffer=sample.dependence_lag)
+    reg = ConditioningRegression(V, sample.time_positions, buffer=sample.dependence_lag,
+                                 period_starts=sample.period_starts)
 
     def resid(values):
         values = np.asarray(values, dtype=float)
@@ -352,11 +359,12 @@ def build_tier(
 def _cmi_calibration(tier: Tier, selection: SelectionConfig) -> Callable:
     """The CMI tier's calibration on surrogate candidates for one state
     (statistics.conditional_independence.calibration)."""
-    def _calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, censor=None):
+    def _calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, censor=None,
+                   period_starts=None):
         return cmi_calibration(tier.test, candidate, obs, conditioning, time_positions, dependence_lag,
                                selection.alpha, tier.effect_size_floor, rng,
                                rate_ratio=selection.cmi_calibration_rate_ratio,
-                               grid_step=grid_step, censor=censor)
+                               grid_step=grid_step, censor=censor, period_starts=period_starts)
     return _calibrate
 
 
@@ -393,7 +401,7 @@ def _guard_on_own_sample(cmi: Tier) -> Callable | None:
         return lambda *args, names=None, **kwargs: cmi.calibration(*args, **kwargs)
 
     def _guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
-               censor=None):
+               censor=None, period_starts=None):
         own = cmi.sample
         name, selected = names
         parts = (([] if own.covariates is None else [as2d(own.covariates)])
@@ -402,5 +410,5 @@ def _guard_on_own_sample(cmi: Tier) -> Callable | None:
         values, own_censor = own.surrogate_source(name)
         extra = {} if own_censor is None else {"censor": own_censor}
         return cmi.calibration(values, own.obs, z, own.time_positions, own.dependence_lag, rng,
-                               grid_step=own.grid_step, **extra)
+                               grid_step=own.grid_step, period_starts=own.period_starts, **extra)
     return _guard

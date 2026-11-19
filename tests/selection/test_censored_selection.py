@@ -24,7 +24,8 @@ class RecordingTest(ConditionalIndependenceTest):
     def __init__(self, effects):
         self.effects, self.calls = effects, []
 
-    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None,
+            period_starts=None):
         names = list(candidates)
         self.calls.append(({nm: np.array(v) for nm, v in candidates.items()},
                            None if conditioning is None else np.array(conditioning)))
@@ -94,7 +95,7 @@ def test_calibration_receives_the_uncensored_candidate_and_its_censoring():
     s = _censored_sample()
     seen = {}
 
-    def calibration(candidate, obs, conditioning, time_positions, lag, rng, grid_step=None, censor=None):
+    def calibration(candidate, obs, conditioning, time_positions, lag, rng, grid_step=None, censor=None, period_starts=None):
         seen.update(candidate=np.array(candidate), conditioning=np.array(conditioning), censor=censor)
         return {"calibrated": True, "n_surrogates": 1, "false_acceptances": 0, "p_value": 1.0}
 
@@ -111,7 +112,7 @@ def test_escalation_guard_uses_the_cmi_tiers_own_uncensored_conditioning_and_sur
     own = _censored_sample(seed=5)
     seen = {}
 
-    def calibration(candidate, obs, conditioning, time_positions, lag, rng, grid_step=None, censor=None):
+    def calibration(candidate, obs, conditioning, time_positions, lag, rng, grid_step=None, censor=None, period_starts=None):
         seen.update(candidate=np.array(candidate), obs=np.array(obs), conditioning=np.array(conditioning),
                     censor=censor)
         return {"calibrated": True}

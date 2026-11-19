@@ -532,33 +532,100 @@ def test_the_nonlinear_effect_size_sees_contributions_that_are_not_monotone_in_t
 
 
 def test_the_effect_sizes_tuning_never_sees_the_block_it_predicts():
-    """With enough blocks, each block's bandwidth and penalty are chosen by
-    cross-validation within the other half of the record, so changing the
-    observations' residuals in one block cannot change which fit predicts
-    that block; with fewer blocks the tuning falls back to all blocks and
-    says so."""
+    """With enough blocks, each group of water years has its bandwidth and
+    penalty chosen by cross-validation over the other groups, outside its
+    buffer, so changing the observations' residuals in one block cannot change
+    which fit predicts that block; with fewer blocks the tuning falls back to
+    all blocks and says so."""
     import model_selection.statistics.conditional_independence.nonlinear as nl
     from model_selection.statistics.regression.kernel_residuals import crossfit_blocks, _folds
     rng = np.random.default_rng(5)
     n = 400
+    t = np.arange(n, dtype=float)
     X1, X2 = rng.normal(size=(n, 3)), rng.normal(size=(n, 6))
     e = X2[:, :2] @ np.array([0.5, -0.5]) + rng.normal(size=n)
-    block, k, _ = crossfit_blocks(np.arange(n, dtype=float), 10.0)
+    block, k, _ = crossfit_blocks(t, 10.0)
     folds, _ = _folds(block, k, 1)
-    assert len(folds) >= nl.MIN_SPLIT_BLOCKS
-    h, split = nl._ridge_direction(e, [X1, X2], folds)
-    assert split
-    # Perturb the first block's residuals: the first half's predictions are
-    # tuned in the second half and fitted without the first block, so they
-    # do not change.
+    assert len(folds) >= nl.MIN_NESTED_BLOCKS
+    h, nested = nl._ridge_direction(e, [X1, X2], folds, t, 10.0)
+    assert nested
+    # Perturb the first block's residuals: its group is tuned on the other
+    # groups, by fits without it, and it is predicted by a fit without it, so
+    # its predictions do not change.
     first = folds[0][0]
     e2 = e.copy()
     e2[first] += 5.0 * rng.normal(size=first.size)
-    h2, _ = nl._ridge_direction(e2, [X1, X2], folds)
+    h2, _ = nl._ridge_direction(e2, [X1, X2], folds, t, 10.0)
     assert np.allclose(h2[first], h[first])
-    few, _ = _folds(*crossfit_blocks(np.arange(n, dtype=float), 80.0)[:2], 1)
-    assert len(few) < nl.MIN_SPLIT_BLOCKS
-    assert nl._ridge_direction(e, [X1, X2], few)[1] is False
+    few, _ = _folds(*crossfit_blocks(t, 80.0)[:2], 1)
+    assert len(few) < nl.MIN_NESTED_BLOCKS
+    assert nl._ridge_direction(e, [X1, X2], few, t, 80.0)[1] is False
+
+
+def _tuning_reference(e, designs, folds, t, lag):
+    """A direct, slow implementation of the effect size's nested tuning, from
+    raw rows: groups of TUNING_WATER_YEARS blocks, each tuned on the other
+    groups outside its buffer by fits without both groups and both buffers;
+    each block predicted by its usual cross-fitted fit."""
+    import model_selection.statistics.conditional_independence.nonlinear as nl
+    from model_selection.statistics.regression.kernel_residuals import RIDGE_PENALTIES
+    e2 = e if e.ndim == 2 else e[:, None]
+    n, rows, size = e2.shape[0], [p for p, _ in folds], nl.TUNING_WATER_YEARS
+    K = len(rows)
+    starts = list(range(0, K, size))
+    if len(starts) > 1 and K - starts[-1] < size:
+        starts.pop()
+    groups = [list(range(a, starts[j + 1] if j + 1 < len(starts) else K)) for j, a in enumerate(starts)]
+    R, B = [], []
+    for blocks in groups:
+        r = np.zeros(n, bool)
+        r[np.concatenate([rows[b] for b in blocks])] = True
+        lo, hi = t[r].min(), t[r].max()
+        R.append(r)
+        B.append((((t >= lo - lag) & (t < lo)) | ((t > hi) & (t <= hi + lag))) & ~r)
+
+    def ridge(X, keep, lam):
+        G = X[keep].T @ X[keep]
+        return np.linalg.solve(G + lam * np.trace(G) / X.shape[1] * np.eye(X.shape[1]), X[keep].T @ e2[keep])
+
+    out = np.zeros_like(e2)
+    for g, blocks in enumerate(groups):
+        best = (np.inf, None)
+        for X in designs:
+            for lam in RIDGE_PENALTIES:
+                err = 0.0
+                for h in range(len(groups)):
+                    evaluate = R[h] & ~B[g]
+                    if h != g and evaluate.any():
+                        keep = ~(R[g] | B[g] | R[h] | B[h])
+                        err += float(((e2[evaluate] - X[evaluate] @ ridge(X, keep, lam)) ** 2).sum())
+                if err < best[0]:
+                    best = (err, (X, lam))
+        X, lam = best[1]
+        for i in blocks:
+            keep = np.ones(n, bool)
+            keep[folds[i][0]] = False
+            keep[np.setdiff1d(np.arange(n), folds[i][1])] = False
+            out[rows[i]] = X[rows[i]] @ ridge(X, keep, lam)
+    return out
+
+
+def test_the_effect_sizes_tuning_matches_a_direct_implementation():
+    """The fast tuning (block and segment Gram matrices, shared
+    eigendecompositions) equals the direct one, with one and two observation
+    columns, a remainder block, and a buffer longer than a block."""
+    import model_selection.statistics.conditional_independence.nonlinear as nl
+    from model_selection.statistics.regression.kernel_residuals import _folds
+    rng = np.random.default_rng(4)
+    for n, k, c, lag in ((400, 10, 1, 7.0), (400, 10, 2, 15.0), (440, 11, 1, 3.0), (480, 12, 1, 60.0)):
+        t = np.arange(n, dtype=float)
+        folds, _ = _folds(np.repeat(np.arange(k), n // k), k, 1)
+        designs = [rng.normal(size=(n, 6)), 0.5 * rng.normal(size=(n, 9))]
+        e = designs[0][:, :2] @ rng.normal(size=(2, c)) + rng.normal(size=(n, c))
+        e = e[:, 0] if c == 1 else e
+        h, nested = nl._ridge_direction(e, designs, folds, t, lag)
+        assert nested
+        assert np.max(np.abs(np.atleast_2d(h.T).T - _tuning_reference(e, designs, folds, t, lag))) < 1e-8
 
 
 def test_fixed_b_draws_match_their_mean_and_kiefer_vogelsangs_critical_values():

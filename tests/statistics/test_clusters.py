@@ -260,3 +260,20 @@ def test_unrestricted_width_is_not_widened_by_a_strong_effect():
     assert abs(n_eff["none", "unrestricted"] / n_eff["none", "restricted"] - 1) < 0.25
     assert n_eff["strong", "restricted"] < 0.8 * n_eff["strong", "unrestricted"]
     assert abs(n_eff["strong", "unrestricted"] / n_eff["none", "unrestricted"] - 1) < 0.25
+
+
+def test_water_year_blocks_of_clusters_never_split_a_cluster():
+    from model_selection.statistics.regression.kernel_residuals import crossfit_blocks
+    from model_selection.statistics.significance.clusters import cluster_coordinates, cluster_period_starts
+    year = 8760.0
+    # Twelve water years with two clusters each; the second cluster of each year runs across the next start.
+    peaks, labels = [], []
+    for y in range(12):
+        peaks += [y * year + 100, y * year + year - 50, (y + 1) * year + 20]
+        labels += [2 * y, 2 * y + 1, 2 * y + 1]
+    peaks, labels = np.array(peaks), np.array(labels)
+    pos, lag = cluster_coordinates(labels, peaks)
+    starts = cluster_period_starts(pos, peaks, np.arange(1, 12) * year)
+    block, k, short = crossfit_blocks(pos.astype(float), lag, starts)
+    assert not short and k == 12
+    assert all(len(set(block[labels == c])) == 1 for c in np.unique(labels))

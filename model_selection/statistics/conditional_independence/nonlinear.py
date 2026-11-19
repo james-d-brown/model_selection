@@ -108,7 +108,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         cached = self._factors.get(id(X))
         return cached[2] if cached is not None and cached[0] is X else 0.0
 
-    def _prepare(self, variables: list, conditioning, time_positions, dependence_lag) -> None:
+    def _prepare(self, variables: list, conditioning, time_positions, dependence_lag, period_starts=None) -> None:
         """Compute, in one parallel pool, every eigendecomposition the round
         needs that is not yet kept: the conditioning regression's, one per
         trial bandwidth, and each variable's feature factor. They are
@@ -117,7 +117,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         from model_selection.parallel import run_tasks
         tasks, slots = [], []
         if conditioning is not None and np.asarray(conditioning).size \
-                and cached_regression(conditioning, time_positions, dependence_lag) is None:
+                and cached_regression(conditioning, time_positions, dependence_lag, period_starts) is None:
             spectra = spectrum_tasks(conditioning)
             tasks += spectra
             slots += [("regression", None)] * len(spectra)
@@ -131,7 +131,8 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         results = run_tasks(tasks)
         spectra = [r for (kind, _), r in zip(slots, results) if kind == "regression"]
         if spectra:
-            shared_regression(conditioning, time_positions, buffer=dependence_lag, spectra=spectra)
+            shared_regression(conditioning, time_positions, buffer=dependence_lag, spectra=spectra,
+                              period_starts=period_starts)
         for (kind, X), r in zip(slots, results):
             if kind == "factor":
                 self._factors[id(X)] = (X, *r)
@@ -175,14 +176,16 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         entry = self._paths.get(id(X))
         return dict(entry[1]) if entry is not None and entry[0] is X else {"censored_means": "fit_then_censor"}
 
-    def _regression(self, conditioning, time_positions, dependence_lag) -> ConditioningRegression | None:
+    def _regression(self, conditioning, time_positions, dependence_lag,
+                    period_starts=None) -> ConditioningRegression | None:
         """Cross-fitted regression on the conditioning set, reused for the
         same arrays (the significance test and the magnitude of its winner)."""
         if conditioning is None or np.asarray(conditioning).size == 0:
             return None
-        return shared_regression(conditioning, time_positions, buffer=dependence_lag)
+        return shared_regression(conditioning, time_positions, buffer=dependence_lag, period_starts=period_starts)
 
-    def _feature_direction(self, candidate, obs, conditioning, time_positions, dependence_lag) -> dict:
+    def _feature_direction(self, candidate, obs, conditioning, time_positions, dependence_lag,
+                           period_starts=None) -> dict:
         """The effect size's parts (magnitude): the held-out error reduction
         of the observations' residuals on Z by the feature direction, at the
         factor's rank and at half of it, the correlation form for one
@@ -191,7 +194,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             BANDWIDTH_MULTIPLIERS as MULTS, _median_bandwidth, _rbf_column, crossfit_blocks, _folds as make_folds,
             low_rank, pivoted_cholesky, standardize as kstd,
         )
-        regression = self._regression(conditioning, time_positions, dependence_lag)
+        regression = self._regression(conditioning, time_positions, dependence_lag, period_starts)
         E_c, own_c, _ = self._residuals(candidate, regression)
         _, own_o, _ = self._residuals(obs, regression)
         e = own_o - own_o.mean(axis=0)
@@ -210,7 +213,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         cap = low_rank() or n
         cap_share = 0.0
         if regression is None:
-            block, k, short = crossfit_blocks(time_positions, dependence_lag)
+            block, k, short = crossfit_blocks(time_positions, dependence_lag, period_starts)
             folds, kept = make_folds(block, k, 1)
             designs, blocks_short = [F], bool(short or kept)
         else:
@@ -231,13 +234,19 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         w, V = np.linalg.eigh(e.T @ e / n)
         keep = w > max(float(w.max()), 0.0) * e.shape[1] * np.finfo(float).eps
         ew = e @ (V[:, keep] / np.sqrt(w[keep]))
-        split = True
+        nested = True
         if ew.shape[1] == 0:
             effect = half = corr = 0.0
         else:
-            h, split = _ridge_direction(ew, designs, folds)
-            h_half, _ = _ridge_direction(ew, [G[:, :max(1, G.shape[1] // 2)] for G in designs], folds)
-            effect, half = _error_reduction(ew, h), _error_reduction(ew, h_half)
+            h, nested = _ridge_direction(ew, designs, folds, time_positions, dependence_lag)
+            effect = _error_reduction(ew, h)
+            # The refit at half the rank feeds only the rank-cap flag, so it is
+            # made only when a factor reached the cap (low_rank_material).
+            half = effect
+            if cap_share > 0:
+                h_half, _ = _ridge_direction(ew, [G[:, :max(1, G.shape[1] // 2)] for G in designs], folds,
+                                             time_positions, dependence_lag)
+                half = _error_reduction(ew, h_half)
             corr = _held_out_r2(ew[:, 0], h[:, 0], folds) if ew.shape[1] == 1 else float("nan")
         return {"features": effect, "features_half": half, "features_corr": corr,
                 "diagnostics": {"crossfit_blocks_short": bool(blocks_short),
@@ -245,10 +254,10 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
                                                           else regression.cap_share),
                                 "low_rank_rank_change": 0.0 if regression is None else regression.rank_change,
                                 "effect_half_rank_change": abs(effect - half),
-                                "effect_tuning_split": bool(split)}}
+                                "effect_tuning_nested": bool(nested)}}
 
     def magnitude(self, candidate, obs, conditioning, time_positions, dependence_lag, observed, null_draws,
-                  grid_step=None, full: ConditioningRegression | None = None):
+                  grid_step=None, full: ConditioningRegression | None = None, period_starts=None):
         """The candidate's share of the variation in the observations left
         unexplained by Z, as the held-out error reduction of a direction
         built from the candidate and Z only (docs/methods.md, Nonlinear tier).
@@ -275,16 +284,18 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         regressions' errors, as for the test (Shah and Peters, 2020).
         `full` is accepted for compatibility and not used. Returns
         (effect, None)."""
-        out = self._feature_direction(candidate, obs, conditioning, time_positions, dependence_lag)
+        out = self._feature_direction(candidate, obs, conditioning, time_positions, dependence_lag, period_starts)
         self.magnitude_diagnostics[id(candidate)] = out["diagnostics"]
         return out["features"], None
 
-    def magnitudes(self, candidates: dict, obs, conditioning, time_positions, dependence_lag) -> dict:
+    def magnitudes(self, candidates: dict, obs, conditioning, time_positions, dependence_lag,
+                   period_starts=None) -> dict:
         """magnitude() of several candidates, in parallel."""
         from model_selection.parallel import parallel_map
         names = list(candidates)
         values = parallel_map(lambda nm: self.magnitude(candidates[nm], obs, conditioning, time_positions,
-                                                        dependence_lag, 0.0, np.zeros(1)), names)
+                                                        dependence_lag, 0.0, np.zeros(1),
+                                                        period_starts=period_starts), names)
         return dict(zip(names, values))
 
     def _cluster_restricted_null(self, names, fitted, obs, E_o, regression, weight_chunks) -> tuple[np.ndarray, dict]:
@@ -348,11 +359,13 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             chunks.append(out)
         return np.concatenate(chunks, axis=0), record
 
-    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None):
+    def run(self, candidates, obs, conditioning, n_resamples, rng, time_positions, dependence_lag, grid_step=None,
+            period_starts=None):
         names = list(candidates)
         n = as2d(obs).shape[0]
-        self._prepare([obs] + [candidates[nm] for nm in names], conditioning, time_positions, dependence_lag)
-        regression = self._regression(conditioning, time_positions, dependence_lag)
+        self._prepare([obs] + [candidates[nm] for nm in names], conditioning, time_positions, dependence_lag,
+                      period_starts)
+        regression = self._regression(conditioning, time_positions, dependence_lag, period_starts)
         E_o, own_o, r2_o = self._residuals(obs, regression)
         # In the low-rank path the statistic is computed from the per-sample
         # vectors u_i = e_C,i (x) e_O,i (Kronecker product of the residual
@@ -464,100 +477,146 @@ def _own_residuals(X: np.ndarray, conditional_mean: np.ndarray) -> np.ndarray:
     return ((x - conditional_mean) / (sd if sd > 0 else 1.0))[:, None]
 
 
-MIN_SPLIT_BLOCKS = 8
-"""Fewest cross-fitting blocks for which the effect size's tuning is split
-into halves (_ridge_direction): each half then keeps at least four blocks,
-one of which (at the join) is left out of the tuning errors."""
+MIN_NESTED_BLOCKS = 8
+"""Fewest cross-fitting blocks for which the effect size's tuning is nested
+(_ridge_direction): with groups of TUNING_WATER_YEARS blocks, each group's
+tuning then has at least two other groups."""
+
+TUNING_WATER_YEARS = 2
+"""Cross-fitting blocks, each a water year, in each outer fold of the effect
+size's nested tuning (_ridge_direction): the smallest number for which the
+tuning's cost stays near that of the tier's other computations; a fold of
+one water year costs several times as much at the rank cap."""
 
 
-def _ridge_paths(X: np.ndarray, e: np.ndarray, G: np.ndarray, c: np.ndarray, out: np.ndarray, pred: np.ndarray):
-    """Predictions at `pred` of ridge regressions of e on X, one per penalty
-    (RIDGE_PENALTIES, relative to the mean eigenvalue of the fitting Gram
-    matrix), fitted on the rows whose Gram matrix G and cross-product c are
-    given, less the rows `out`."""
+def _ridge_coefficients(G: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """(columns, observation columns, penalties): ridge coefficients for every
+    penalty (RIDGE_PENALTIES, relative to the mean eigenvalue of the Gram
+    matrix G), from one eigendecomposition, with cross-product c."""
     from model_selection.statistics.regression.kernel_residuals import RIDGE_PENALTIES
-    Gf, cf = G - X[out].T @ X[out], c - X[out].T @ e[out]
-    ev, Q = np.linalg.eigh((Gf + Gf.T) / 2.0)
-    scale = max(float(np.trace(Gf)) / X.shape[1], 1e-300)
-    A, q = X[pred] @ Q, Q.T @ cf
-    return [A @ (q / (np.clip(ev, 0, None) + lam * scale)[:, None]) for lam in RIDGE_PENALTIES]
+    lam = np.asarray(RIDGE_PENALTIES, dtype=float)
+    ev, Q = np.linalg.eigh((G + G.T) / 2.0)
+    scale = max(float(np.trace(G)) / G.shape[0], 1e-300)
+    a = (Q.T @ c)[:, :, None] / (np.clip(ev, 0, None)[:, None, None] + lam[None, None, :] * scale)
+    return (Q @ a.reshape(G.shape[0], -1)).reshape(G.shape[0], c.shape[1], lam.size)
 
 
-def _ridge_direction(e: np.ndarray, designs: list, folds: list) -> tuple[np.ndarray, bool]:
-    """(held-out predictions of e, whether the tuning was split): ridge
+def _predict(X: np.ndarray, coef: np.ndarray) -> np.ndarray:
+    """(rows, observation columns, penalties): predictions of X's rows."""
+    return (X @ coef.reshape(X.shape[1], -1)).reshape(X.shape[0], coef.shape[1], coef.shape[2])
+
+
+def _tuning_groups(folds: list, time_positions: np.ndarray, dependence_lag: float):
+    """The outer folds of the effect size's nested tuning: groups of
+    TUNING_WATER_YEARS consecutive blocks (a remainder joins the last group),
+    each with a buffer of the samples within one dependence lag of its span.
+    Returns the groups (block indices), the atomic segments of the record
+    (rows), and each group's rows R and buffer B as sets of segments: every
+    set the tuning uses is a union of segments, whose Gram matrices are then
+    formed once."""
+    rows = [p for p, _ in folds]
+    K, size = len(rows), TUNING_WATER_YEARS
+    starts = list(range(0, K, size))
+    if len(starts) > 1 and K - starts[-1] < size:
+        starts.pop()
+    groups = [list(range(a, starts[j + 1] if j + 1 < len(starts) else K)) for j, a in enumerate(starts)]
+    t = np.asarray(time_positions, dtype=float)
+    member = np.zeros((t.size, 2 * len(groups)), bool)
+    for g, blocks in enumerate(groups):
+        r = np.concatenate([rows[b] for b in blocks])
+        member[r, 2 * g] = True
+        lo, hi = float(t[r].min()), float(t[r].max())
+        member[:, 2 * g + 1] = ((t >= lo - dependence_lag) & (t < lo)) | ((t > hi) & (t <= hi + dependence_lag))
+        member[r, 2 * g + 1] = False
+    signature, segment = np.unique(member, axis=0, return_inverse=True)
+    segment = np.asarray(segment).ravel()
+    segments = [np.flatnonzero(segment == k) for k in range(len(signature))]
+    R = [frozenset(np.flatnonzero(signature[:, 2 * g])) for g in range(len(groups))]
+    B = [frozenset(np.flatnonzero(signature[:, 2 * g + 1])) for g in range(len(groups))]
+    return groups, segments, R, B
+
+
+def _ridge_direction(e: np.ndarray, designs: list, folds: list, time_positions: np.ndarray,
+                     dependence_lag: float) -> tuple[np.ndarray, bool]:
+    """(held-out predictions of e, whether the tuning was nested): ridge
     regression of e on one of `designs` (one per bandwidth), each block
     predicted by a fit on its fold's fitting samples.
 
-    The design and penalty used for a block are chosen without that block:
-    the blocks are split into two contiguous halves, and the design and
-    penalty for the blocks of one half are those with the smallest blocked
-    cross-validation error within the other half, whose block next to the
-    join is left out of the errors (nested cross-validation with two outer
-    folds; Stone, 1974; Varma and Simon, 2006). Choosing them by the
-    held-out errors of the predicted blocks themselves would make the
-    reported error the smallest of many noisy estimates, which is
-    optimistic. With fewer than MIN_SPLIT_BLOCKS blocks the design and
-    penalty are chosen by all blocks' held-out errors, and the second value
-    is False."""
+    The design and penalty used for a block are chosen without that block
+    (nested cross-validation; Stone, 1974; Varma and Simon, 2006): the blocks
+    are grouped in TUNING_WATER_YEARS consecutive water years, and those of
+    group g are chosen by cross-validation over the other groups, each
+    predicted, outside g's buffer, by a fit that leaves out both groups and
+    a buffer of one dependence lag on each side of each (_tuning_groups).
+    Choosing them by the held-out errors of the predicted blocks themselves
+    would make the reported error the smallest of many noisy estimates,
+    which is optimistic. With fewer than MIN_NESTED_BLOCKS blocks the design
+    and penalty are chosen by all blocks' held-out errors, and the second
+    value is False.
+
+    Each block's Gram matrix, and each segment's, is formed once; a fit's
+    Gram matrix is the total less those it leaves out, and its
+    eigendecomposition gives the coefficients for every penalty, and serves
+    both groups whose exclusions it combines."""
     e2 = e if e.ndim == 2 else e[:, None]
     designs = [X for X in designs if X.shape[1] > 0]
     if not designs:
         return np.zeros_like(e), False
-    n, K = e2.shape[0], len(folds)
-    every = np.arange(n)
-    # Each option's held-out predictions of every block, from the usual fits.
-    full = []
-    for X in designs:
-        G, c = X.T @ X, X.T @ e2
-        preds = None
-        for pred, fit in folds:
-            out = np.setdiff1d(every, fit, assume_unique=True)
-            paths = _ridge_paths(X, e2, G, c, out, pred)
-            if preds is None:
-                preds = [np.zeros_like(e2) for _ in paths]
-            for j, h in enumerate(paths):
-                preds[j][pred] = h
-        full.append(preds)
-    split = K >= MIN_SPLIT_BLOCKS
-    h = np.zeros_like(e2)
-    if not split:
-        d, j = min(((d, j) for d in range(len(full)) for j in range(len(full[d]))),
-                   key=lambda dj: float(np.sum((e2 - full[dj[0]][dj[1]]) ** 2)))
-        h = full[d][j]
+    rows = [p for p, _ in folds]
+    n, K = e2.shape[0], len(rows)
+    label = np.full(n, -1)
+    for k, r in enumerate(rows):
+        label[r] = k
+    left_out = []
+    for _, fit in folds:
+        keep = np.zeros(n, bool)
+        keep[fit] = True
+        left_out.append([int(m) for m in np.unique(label[~keep])])
+    nested = K >= MIN_NESTED_BLOCKS
+    if nested:
+        groups, segments, R, B = _tuning_groups(folds, time_positions, dependence_lag)
+    full, err = [], None
+    for d, X in enumerate(designs):
+        Gb = [X[r].T @ X[r] for r in rows]
+        cb = [X[r].T @ e2[r] for r in rows]
+        Gt, ct = sum(Gb), sum(cb)
+        # Each block's predictions, for every penalty, from its usual fit.
+        full.append([_predict(X[rows[i]], _ridge_coefficients(Gt - sum((Gb[m] for m in left_out[i]),
+                                                                         np.zeros_like(Gt)),
+                                                              ct - sum((cb[m] for m in left_out[i]),
+                                                                       np.zeros_like(ct))))
+                     for i in range(K)])
+        if not nested:
+            continue
+        if err is None:
+            err = np.zeros((len(groups), len(designs), full[0][0].shape[2]))
+        Gs = [X[r].T @ X[r] for r in segments]
+        cs = [X[r].T @ e2[r] for r in segments]
+        for g in range(len(groups)):
+            for h in range(g + 1, len(groups)):
+                serve_g, serve_h = R[h] - B[g], R[g] - B[h]   # h's rows outside g's buffer tune g
+                if not serve_g and not serve_h:
+                    continue
+                excl = R[g] | B[g] | R[h] | B[h]
+                coef = _ridge_coefficients(Gt - sum((Gs[k] for k in excl), np.zeros_like(Gt)),
+                                           ct - sum((cs[k] for k in excl), np.zeros_like(ct)))
+                for target, segs in ((g, serve_g), (h, serve_h)):
+                    if segs:
+                        r = np.concatenate([segments[k] for k in segs])
+                        err[target, d] += ((e2[r][:, :, None] - _predict(X[r], coef)) ** 2).sum((0, 1))
+    out = np.zeros_like(e2)
+    if not nested:
+        total = np.array([[sum(((e2[rows[i]][:, :, None] - full[d][i]) ** 2).sum((0, 1)) for i in range(K))]
+                          for d in range(len(designs))])[:, 0, :]
+        d, j = np.unravel_index(int(np.argmin(total)), total.shape)
+        for i in range(K):
+            out[rows[i]] = full[d][i][:, :, j]
     else:
-        half = K // 2
-        halves = (list(range(half)), list(range(half, K)))
-
-        def tuned(inside: list, skip: int) -> tuple[int, int]:
-            rows = np.concatenate([folds[i][0] for i in inside])
-            err = None
-            for d, X in enumerate(designs):
-                Xh, eh = X[rows], e2[rows]
-                G, c = Xh.T @ Xh, Xh.T @ eh
-                pos = {r: k for k, r in enumerate(rows)}
-                for i in inside:
-                    if i == skip:
-                        continue
-                    pred = folds[i][0]
-                    out = np.concatenate([folds[m][0] for m in (i - 1, i, i + 1) if m in inside])
-                    local_out = np.array([pos[r] for r in out])
-                    local_pred = np.array([pos[r] for r in pred])
-                    paths = _ridge_paths(Xh, eh, G, c, local_out, local_pred)
-                    if err is None:
-                        err = np.zeros((len(designs), len(paths)))
-                    for j, hp in enumerate(paths):
-                        err[d, j] += float(np.sum((eh[local_pred] - hp) ** 2))
-            d, j = np.unravel_index(int(np.argmin(err)), err.shape)
-            return int(d), int(j)
-
-        # The first half's blocks are tuned within the second half, without its
-        # first block (next to the join), and the reverse.
-        for served, inside, skip in ((halves[0], halves[1], halves[1][0]), (halves[1], halves[0], halves[0][-1])):
-            d, j = tuned(inside, skip)
-            for i in served:
-                pred = folds[i][0]
-                h[pred] = full[d][j][pred]
-    return (h if e.ndim == 2 else h[:, 0]), split
+        for g, blocks in enumerate(groups):
+            d, j = np.unravel_index(int(np.argmin(err[g])), err[g].shape)
+            for i in blocks:
+                out[rows[i]] = full[d][i][:, :, j]
+    return (out if e.ndim == 2 else out[:, 0]), nested
 
 
 def _error_reduction(e: np.ndarray, h: np.ndarray) -> float:

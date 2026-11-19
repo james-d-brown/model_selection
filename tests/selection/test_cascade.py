@@ -217,7 +217,7 @@ def test_the_escalation_calibration_check_uses_the_cmi_tiers_own_sample():
     tiers = build_cascade(SelectionConfig(), AdequacyConfig(), False, tier_samples={"cmi": own})
     seen = {}
 
-    def calibration(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None):
+    def calibration(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, period_starts=None):
         seen.update(candidate=candidate, obs=obs, conditioning=conditioning, t=time_positions, step=grid_step)
         return {"calibrated": True}
 

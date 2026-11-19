@@ -78,6 +78,7 @@ def cmi_calibration(
         rate_ratio: float = 3.0,
         grid_step: float | None = None,
         censor=None,
+        period_starts: np.ndarray | None = None,
 ) -> dict:
     """False-acceptance rate of the CMI test `test` on surrogates of
     `candidate` given `conditioning` (see the module docstring). Each
@@ -86,10 +87,13 @@ def cmi_calibration(
     censor : with censoring at high flow, `candidate` is the uncensored
         candidate and censor(values) censors a surrogate at the candidate's
         threshold, so that every surrogate has the candidate's point mass
-        there (docs/methods.md, Censoring at high flow); None otherwise."""
+        there (docs/methods.md, Censoring at high flow); None otherwise.
+    period_starts : the water-year starts for the regression's cross-fitting
+        blocks (ConditioningRegression); None for blocks of equal span."""
     C = as2d(np.asarray(candidate, dtype=float))
     n = C.shape[0]
-    regression = ConditioningRegression(conditioning, time_positions, buffer=dependence_lag)
+    regression = ConditioningRegression(conditioning, time_positions, buffer=dependence_lag,
+                                        period_starts=period_starts)
     resid, _ = regression.residuals(C)
     fitted = C - resid
     n_surrogates = surrogates_needed(alpha, rate_ratio)
@@ -104,7 +108,7 @@ def cmi_calibration(
             stopping_exceedances(alpha, n_resamples), grid_step=grid_step)
         if p_value < alpha:
             effect, _ = test.magnitude(surrogate, obs, conditioning, time_positions, dependence_lag, observed, null,
-                                       grid_step=grid_step)
+                                       grid_step=grid_step, period_starts=period_starts)
             accepted += bool(effect >= effect_size_floor)
     p_value = float(binom.sf(accepted - 1, n_surrogates, alpha)) if accepted > 0 else 1.0
     return {"n_surrogates": n_surrogates, "false_acceptances": accepted,

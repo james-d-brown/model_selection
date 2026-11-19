@@ -28,8 +28,10 @@ enough to run from near-interpolation to a near-constant fit (10^-6 to 10^6
 against the kernel's unit diagonal).
 
 Cross-fitting (Semenova et al., 2023). The samples' time span is divided
-into CROSSFIT_BLOCKS contiguous blocks of equal span, each at least one
-dependence lag long (fewer blocks on short records, at least
+into blocks of whole water years, each at least one dependence lag long
+(crossfit_blocks); without water-year starts, or when they give fewer than
+MIN_CROSSFIT_BLOCKS blocks, into CROSSFIT_BLOCKS contiguous blocks of equal
+span, each at least one lag long (fewer on short records, at least
 MIN_CROSSFIT_BLOCKS; records shorter than that many lags are recorded as
 blocks_short). Each block's residuals come from the fit to the samples
 outside the block and its two neighbouring blocks. The bandwidth and penalty
@@ -207,12 +209,25 @@ def feature_factor(X: np.ndarray) -> np.ndarray:
     return feature_factor_with_cap(X)[0]
 
 
-def crossfit_blocks(time_positions: np.ndarray, dependence_lag: float) -> tuple[np.ndarray, int, bool]:
-    """(block of each sample, number of blocks, too short): CROSSFIT_BLOCKS
+def crossfit_blocks(time_positions: np.ndarray, dependence_lag: float,
+                    period_starts: np.ndarray | None = None) -> tuple[np.ndarray, int, bool]:
+    """(block of each sample, number of blocks, too short).
+
+    With period_starts (the time positions at which each water year begins):
+    blocks of whole water years, one per water year, except that a block
+    takes in the following water years until it spans at least the
+    dependence lag, and a shorter remainder at the end of the record joins
+    the block before it. A partial water year at either end of the record is
+    a block if it spans the lag. When this gives fewer than
+    MIN_CROSSFIT_BLOCKS blocks, or without period_starts: CROSSFIT_BLOCKS
     blocks of equal time span, fewer when a block would be shorter than the
     dependence lag, at least MIN_CROSSFIT_BLOCKS; too short when even those
     are shorter than the lag."""
     t = np.asarray(time_positions, dtype=float)
+    if period_starts is not None and t.size:
+        blocks = _period_blocks(t, float(dependence_lag), np.asarray(period_starts, dtype=float))
+        if blocks is not None:
+            return blocks
     span = float(t.max() - t.min()) if t.size else 0.0
     k = CROSSFIT_BLOCKS
     if dependence_lag > 0 and span > 0:
@@ -221,6 +236,26 @@ def crossfit_blocks(time_positions: np.ndarray, dependence_lag: float) -> tuple[
     k = max(k, MIN_CROSSFIT_BLOCKS)
     edges = t.min() + span * np.arange(1, k) / k if span > 0 else np.array([])
     return np.searchsorted(edges, t, side="right"), k, short
+
+
+def _period_blocks(t: np.ndarray, lag: float, period_starts: np.ndarray) -> tuple[np.ndarray, int, bool] | None:
+    """crossfit_blocks with water-year starts; None when they give fewer than
+    MIN_CROSSFIT_BLOCKS blocks. The pieces of the record between consecutive
+    starts are taken in time order, and a block closes once it spans the lag."""
+    lo, hi = float(t.min()), float(t.max())
+    starts = np.unique(period_starts[(period_starts > lo) & (period_starts <= hi)])
+    bounds = np.concatenate([[lo], starts, [hi]])
+    edges, opened = [], lo
+    for k in range(1, len(bounds) - 1):          # bounds[k] is the start of a later piece
+        if bounds[k] - opened >= lag:
+            edges.append(bounds[k])
+            opened = bounds[k]
+    if edges and hi - opened < lag:              # the last block would be short: it joins the one before
+        edges.pop()
+    k = len(edges) + 1
+    if k < MIN_CROSSFIT_BLOCKS:
+        return None
+    return np.searchsorted(np.asarray(edges), t, side="right"), k, False
 
 
 def _folds(block: np.ndarray, k: int, n_regressors: int) -> tuple[list, bool]:
@@ -344,6 +379,9 @@ class ConditioningRegression:
     variables regressed on it.
 
     buffer : the dependence lag, the shortest block length.
+    period_starts : the time positions at which each water year begins, for
+        blocks of whole water years (crossfit_blocks); None for blocks of
+        equal span.
     blocks_short : the record spans fewer than MIN_CROSSFIT_BLOCKS lags, or a
         fit kept its neighbouring blocks for lack of samples.
     cap_share : largest share of a kernel's trace left out by a factor that
@@ -357,13 +395,13 @@ class ConditioningRegression:
     """
 
     def __init__(self, Z: np.ndarray, time_positions: np.ndarray, buffer: float = 0.0,
-                 spectra: list | None = None):
+                 spectra: list | None = None, period_starts: np.ndarray | None = None):
         """spectra: the results of spectrum_tasks(Z), when they were computed
         elsewhere; computed here otherwise. The blocks' decompositions, one per
         bandwidth and block, are computed here as parallel tasks."""
         Z = standardize(as2d(np.asarray(Z, dtype=float)))
         self.n = Z.shape[0]
-        block, k, short = crossfit_blocks(time_positions, buffer)
+        block, k, short = crossfit_blocks(time_positions, buffer, period_starts)
         self.n_blocks = k
         folds, kept = _folds(block, k, Z.shape[1])
         self.blocks_short = bool(short or kept)
@@ -498,21 +536,25 @@ SHARED_REGRESSIONS = 2
 n x n eigendecomposition per trial bandwidth)."""
 
 
-def _shared_key(Z2: np.ndarray, t: np.ndarray, buffer: float):
+def _shared_key(Z2: np.ndarray, t: np.ndarray, buffer: float, period_starts: np.ndarray | None = None):
     import hashlib
     columns = sorted(hashlib.sha1(np.ascontiguousarray(Z2[:, j]).tobytes()).hexdigest() for j in range(Z2.shape[1]))
-    return (tuple(columns), Z2.shape[0], hashlib.sha1(t.tobytes()).hexdigest(), float(buffer))
+    periods = None if period_starts is None else hashlib.sha1(
+        np.ascontiguousarray(period_starts, dtype=float).tobytes()).hexdigest()
+    return (tuple(columns), Z2.shape[0], hashlib.sha1(t.tobytes()).hexdigest(), float(buffer), periods)
 
 
-def cached_regression(Z: np.ndarray, time_positions: np.ndarray, buffer: float = 0.0) -> ConditioningRegression | None:
+def cached_regression(Z: np.ndarray, time_positions: np.ndarray, buffer: float = 0.0,
+                      period_starts: np.ndarray | None = None) -> ConditioningRegression | None:
     """The shared regression on Z if one is kept, else None (nothing built)."""
-    key = _shared_key(as2d(np.asarray(Z, dtype=float)), np.asarray(time_positions, dtype=float), buffer)
+    key = _shared_key(as2d(np.asarray(Z, dtype=float)), np.asarray(time_positions, dtype=float), buffer,
+                      period_starts)
     with _SHARED_LOCK:
         return next((reg for k, reg in _SHARED if k == key), None)
 
 
 def shared_regression(Z: np.ndarray, time_positions: np.ndarray, buffer: float = 0.0,
-                      spectra: list | None = None) -> ConditioningRegression:
+                      spectra: list | None = None, period_starts: np.ndarray | None = None) -> ConditioningRegression:
     """A ConditioningRegression on Z, reused when the same conditioning set
     recurs, as when a comparison tests C beyond (Z, W) and then W beyond
     (Z, C): both effect sizes regress on {Z, W, C}. The fit does not depend
@@ -523,13 +565,13 @@ def shared_regression(Z: np.ndarray, time_positions: np.ndarray, buffer: float =
     regressions on different sets are built in parallel."""
     Z2 = as2d(np.asarray(Z, dtype=float))
     t = np.asarray(time_positions, dtype=float)
-    key = _shared_key(Z2, t, buffer)
+    key = _shared_key(Z2, t, buffer, period_starts)
     with _SHARED_LOCK:
         for i, (k, reg) in enumerate(_SHARED):
             if k == key:
                 _SHARED.insert(0, _SHARED.pop(i))
                 return reg
-    reg = ConditioningRegression(Z2, t, buffer=buffer, spectra=spectra)
+    reg = ConditioningRegression(Z2, t, buffer=buffer, spectra=spectra, period_starts=period_starts)
     with _SHARED_LOCK:
         _SHARED.insert(0, (key, reg))
         del _SHARED[SHARED_REGRESSIONS:]

@@ -146,6 +146,20 @@ def cluster_coordinates(labels: np.ndarray, time_positions: np.ndarray | None = 
     return positions, CLUSTER_SPACING
 
 
+def cluster_period_starts(positions: np.ndarray, time_positions: np.ndarray,
+                          period_starts: np.ndarray) -> np.ndarray:
+    """Water-year starts (period_starts, in the units of time_positions) in
+    cluster coordinates: for each start, the coordinate of the first cluster
+    whose first sample is at or after it. A cluster belongs to the water year
+    of its first sample, so it is never split between blocks."""
+    positions = np.asarray(positions)
+    t = np.asarray(time_positions, dtype=float)
+    coords = np.unique(positions)
+    first = np.array([t[positions == c].min() for c in coords])
+    out = [coords[first >= s].min() for s in np.asarray(period_starts, dtype=float) if np.any(first >= s)]
+    return np.unique(np.asarray(out, dtype=float))
+
+
 def cluster_summary(labels: np.ndarray) -> dict:
     """Number of samples and clusters, and the number of clusters of each size."""
     sizes = np.bincount(np.unique(np.asarray(labels), return_inverse=True)[1])

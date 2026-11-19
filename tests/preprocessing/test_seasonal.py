@@ -6,7 +6,7 @@ from scipy.signal import lfilter
 
 from model_selection.preprocessing.seasonal import (
     MIN_YEARS, N_DAYS, SeasonalConfig, calendar_day, phase_residuals, resolve_seasonal, seasonal_phase,
-    years_per_calendar_day,
+    water_year, water_year_starts, years_per_calendar_day,
 )
 
 
@@ -134,3 +134,19 @@ def test_seasonal_conditioning_is_disabled_on_records_too_short_to_describe_the_
 def test_disabled_seasonal_conditioning_stays_disabled_without_a_note():
     config, note = resolve_seasonal(SeasonalConfig(enabled=False), _hourly(years=10))
     assert not config.enabled and note is None
+
+
+def test_water_years_run_from_1_october_to_30_september():
+    index = pd.DatetimeIndex(["2000-09-30 23:00", "2000-10-01 00:00", "2001-09-30 23:00", "2001-10-01 00:00"])
+    assert water_year(index).tolist() == [2000, 2001, 2001, 2002]
+    assert water_year_starts(index).tolist() == [1, 3]
+    assert water_year_starts(pd.date_range("2000-10-01", periods=48, freq="h")).size == 0
+
+
+def test_the_seasonal_tuning_leaves_the_neighbouring_water_years_out_of_each_fit():
+    from model_selection.preprocessing.seasonal import _tuning_fit_rows
+    year = np.repeat(np.arange(2001, 2011), 3)
+    assert sorted(set(year[_tuning_fit_rows(year, 2005)])) == [2001, 2002, 2003, 2007, 2008, 2009, 2010]
+    assert sorted(set(year[_tuning_fit_rows(year, 2001)])) == list(range(2003, 2011))
+    short = np.repeat([2001, 2002, 2003], 3)                 # the neighbours would leave no year to fit
+    assert sorted(set(short[_tuning_fit_rows(short, 2002)])) == [2001, 2003]
