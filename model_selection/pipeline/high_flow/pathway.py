@@ -284,7 +284,7 @@ def run_high_flow_analysis(
     sensitivity = None
     dependence_record = None
     all_events = []
-    power_stop_reason = None
+    not_run_reason = None
     n_components = 0
     event_gallery_path = overview_diagnostic_path = None
 
@@ -319,9 +319,9 @@ def run_high_flow_analysis(
         power_summary["n_events_with_observation_gaps"] = n_obs_gaps
 
     if len(usable_events) < 2:
-        power_stop_reason = (f"{len(usable_events)} usable consensus high-flow event(s); at least 2 are needed "
+        not_run_reason = (f"{len(usable_events)} usable consensus high-flow event(s); at least 2 are needed "
                              "for any test.")
-        notes.append(f"High-flow selection not run: {power_stop_reason}")
+        notes.append(f"High-flow selection not run: {not_run_reason}")
         power_summary["n_fpc_events"] = 0
     else:
         expanded_events = usable_events
@@ -392,9 +392,9 @@ def run_high_flow_analysis(
             logger.info(f"[+] Wrote high-flow overview diagnostics for {gage} to {overview_diagnostic_path}")
 
         if n_fpc_events < 2:
-            power_stop_reason = (f"{n_fpc_events} event(s) survived min_event_length={fpca.min_event_length}; "
+            not_run_reason = (f"{n_fpc_events} event(s) survived min_event_length={fpca.min_event_length}; "
                                  "at least 2 are needed for any test.")
-            notes.append(f"High-flow selection not run: {power_stop_reason}")
+            notes.append(f"High-flow selection not run: {not_run_reason}")
         else:
             event_by_id = {ev.event_id: ev for ev in expanded_events}
             obs_features, candidate_events = event_feature_matrices(
@@ -407,12 +407,12 @@ def run_high_flow_analysis(
             n_dims = obs_features.shape[1]
             n_reg = registration.shape[1]
             if rao_degrees(n_fpc_events, n_dims, n_dims, n_reg).v <= 0:
-                power_stop_reason = (
+                not_run_reason = (
                     f"{n_fpc_events} events cannot support a test with {n_dims}-dimensional event features "
                     "(no denominator degrees of freedom remain)."
                 )
-            if power_stop_reason:
-                notes.append(f"High-flow selection not run: {power_stop_reason}")
+            if not_run_reason:
+                notes.append(f"High-flow selection not run: {not_run_reason}")
             else:
                 # Which events the tests treat as dependent (docs/methods.md, Dependence between samples).
                 step_hours = (basin.obs.index[1] - basin.obs.index[0]) / pd.Timedelta(hours=1)
@@ -533,7 +533,7 @@ def run_high_flow_analysis(
         event_gallery_path=event_gallery_path, overview_diagnostic_path=overview_diagnostic_path,
         measure=selection.measure, committed_tier=committed_tier, attempted_tiers=attempted_tiers,
         adequacy_floor=adequacy.resolved_effect_size_floor(selection) if selection.measure == CASCADE else None,
-        meaningful_r2=selection.meaningful_r2, power_stop_reason=power_stop_reason,
+        meaningful_r2=selection.meaningful_r2, not_run_reason=not_run_reason,
     )
     if output_dir is not None:
         # Plots show each formulation's own values and the observations with their gaps.

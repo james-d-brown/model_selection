@@ -100,7 +100,7 @@ class HighFlowResult:
     committed_tier: str | None = None
     attempted_tiers: list[dict] = field(default_factory=list)
     meaningful_r2: float | None = None
-    power_stop_reason: str | None = None
+    not_run_reason: str | None = None
     adequacy_floor: float | None = None
     seed: int | None = None
     cmi_calibration: bool = True
@@ -401,9 +401,9 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
             "than three years), so the tests did not condition on the seasonal phase: a formulation can be "
             "credited with reproducing the seasonal cycle.")})
     if isinstance(result, HighFlowResult):
-        if result.power_stop_reason:
+        if result.not_run_reason:
             flags.append({"code": "untestable", "message": (
-                f"high-flow selection not run: {result.power_stop_reason}")})
+                f"high-flow selection not run: {result.not_run_reason}")})
         unresolved = sorted(name for name, meta in (result.wasp_metadata or {}).items()
                             if name != OBS_KEY and meta.get("scale_range_too_short"))
         if unresolved:
@@ -555,7 +555,7 @@ def high_flow_result_to_dict(result: HighFlowResult) -> dict:
         "peak_phase_spread": result.peak_phase_spread,
         "requires_closer_inspection": result.requires_closer_inspection,
         "meaningful_r2": result.meaningful_r2,
-        "power_stop_reason": result.power_stop_reason,
+        "not_run_reason": result.not_run_reason,
         "ensemble_representation": result.ensemble_representation,
         "high_flow_power": result.high_flow_power,
         "measure": result.measure,
@@ -600,7 +600,7 @@ def _pathway_outcome(label: str, result) -> str:
     B, Reporting of interchangeable formulations)."""
     sel = result.selection if result is not None else None
     if sel is None:
-        reason = getattr(result, "power_stop_reason", None) if result is not None else None
+        reason = getattr(result, "not_run_reason", None) if result is not None else None
         return f"{label}: not run" + (f" ({reason})" if reason else "")
     selected = [st.formulation for st in sel.trajectory if st.accepted]
     if not selected:

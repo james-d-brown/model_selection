@@ -271,25 +271,26 @@ def test_rank_change_is_measured_only_when_the_chosen_factor_is_capped():
         kr.set_low_rank(kr.DEFAULT_RANK_CAP)
 
 
-def test_the_split_feature_factor_has_the_same_kernel_and_leading_columns_first():
-    from model_selection.statistics.regression.kernel_residuals import (
-        feature_factor_split, feature_factor_with_cap, feature_kernel)
-    x = np.random.default_rng(12).gamma(2.0, size=300)
-    L, _, groups = feature_factor_split(x)
-    assert np.allclose(L @ L.T, feature_kernel(x), atol=1e-8)
-    assert np.allclose(L[:, 0], (x - x.mean()) / x.std())          # the variable's own column first
-    var = (L[:, 1:] - L[:, 1:].mean(axis=0)).var(axis=0)
-    assert np.all(np.diff(var) <= 1e-9)                              # principal axes, largest first
-    assert groups[0] == [0] and sorted(j for g in groups for j in g) == list(range(L.shape[1]))
+def test_the_fold_spectrum_falls_back_to_the_svd_when_the_eigendecomposition_fails(monkeypatch):
+    """A failed eigendecomposition of a fold's Gram matrix is replaced by the
+    SVD of the centred factor: the same fold operator, with fewer fitting
+    samples than columns as well as more."""
+    import model_selection.statistics.regression.kernel_residuals as kr
+    rng = np.random.default_rng(14)
+    for n, r in ((60, 12), (14, 12)):
+        G = rng.standard_normal((n, r)) * np.logspace(0, -5, r)
+        s, U = kr._spectrum_of_factor(G)
+        fit, pred = np.arange(n // 3, n), np.arange(n // 3)
+        normal = kr._fold_decomposition(s, U, pred, fit, n)
+        real = np.linalg.eigh
 
+        def failing(*args, **kwargs):
+            raise np.linalg.LinAlgError("Eigenvalues did not converge")
+        monkeypatch.setattr(np.linalg, "eigh", failing)
+        fallback = kr._fold_decomposition(s, U, pred, fit, n)
+        monkeypatch.setattr(np.linalg, "eigh", real)
+        assert np.allclose(normal[2], fallback[2], atol=1e-10 * s.max())
+        for lam in (1e-6, 1e-2):
+            op = [(d[3] / (d[2] + lam * s.max())) @ d[3].T * lam * s.max() for d in (normal, fallback)]
+            assert np.allclose(op[0], op[1], atol=1e-6)
 
-def test_residuals_by_group_with_one_group_match_the_shared_tuning():
-    from model_selection.statistics.regression.kernel_residuals import ConditioningRegression
-    rng = np.random.default_rng(13)
-    z = rng.uniform(-2, 2, size=(250, 1))
-    Y = np.column_stack([np.sin(2 * z[:, 0]) + 0.3 * rng.standard_normal(250), z[:, 0] ** 2 + rng.standard_normal(250)])
-    reg = ConditioningRegression(z, np.arange(250), buffer=0)
-    shared, _ = reg.residuals(Y)
-    assert np.allclose(reg.residuals_by_group(Y, [[0, 1]]), shared)
-    each = reg.residuals_by_group(Y, [[0], [1]])
-    assert np.allclose(each[:, [0]], reg.residuals(Y[:, [0]])[0]) and np.allclose(each[:, [1]], reg.residuals(Y[:, [1]])[0])

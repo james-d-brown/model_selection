@@ -10,3 +10,6 @@ dist/
 evaluate.py
 README.html
 docs/methods.html
+
+# Diagnostic scripts (kept locally, not committed)
+scripts/diagnostics/

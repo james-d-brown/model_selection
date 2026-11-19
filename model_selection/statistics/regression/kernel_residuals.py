@@ -203,36 +203,6 @@ def feature_factor_with_cap(X: np.ndarray) -> tuple[np.ndarray, float]:
     return pivoted_cholesky(sq + 1.0, lambda p: Xs @ Xs[p] + rbf(p), _LOW_RANK, kind="features")
 
 
-def feature_factor_split(X: np.ndarray, min_share: float = 0.01) -> tuple[np.ndarray, float, list]:
-    """(factor, cap share, column groups) of the same feature kernel as
-    feature_factor_with_cap, arranged so that its columns can be tuned
-    separately: the standardized variable's own columns first, then the
-    radial basis function kernel's factor rotated to its principal axes
-    (the centred factor's singular vectors, largest first). The kernel, and
-    so any statistic of its inner products, is unchanged. Groups: each own
-    column alone, each principal column holding at least `min_share` of the
-    factor's total variance alone, the remaining columns together."""
-    Xs = standardize(X)
-    n, d = Xs.shape
-    bw = _feature_bandwidth(Xs)
-    sq = (Xs ** 2).sum(1)
-    if not _use_low_rank(n):
-        R, cap = kernel_factor(np.exp(-_sq_dists(Xs, Xs) / (2.0 * bw ** 2))), 0.0
-    else:
-        R, cap = pivoted_cholesky(np.ones(n), _rbf_column(Xs, sq, bw), _LOW_RANK, kind="features")
-    Rc = R - R.mean(axis=0)
-    _, sv, Vt = np.linalg.svd(Rc, full_matrices=False)
-    R = R @ Vt.T
-    L = np.column_stack([Xs, R])
-    var = np.concatenate([Xs.var(axis=0) * n, sv ** 2])
-    share = var / var.sum()
-    groups = [[j] for j in range(d)]
-    big = [d + j for j in range(R.shape[1]) if share[d + j] >= min_share]
-    rest = [d + j for j in range(R.shape[1]) if share[d + j] < min_share]
-    groups += [[j] for j in big] + ([rest] if rest else [])
-    return L, cap, groups
-
-
 def feature_factor(X: np.ndarray) -> np.ndarray:
     return feature_factor_with_cap(X)[0]
 
@@ -277,14 +247,38 @@ def _fold_decomposition(s: np.ndarray, U: np.ndarray, pred: np.ndarray, fit: np.
     Phi has centred columns and Phi' Phi = diag(s), so the Gram matrix over
     the fitting samples is diag(s) minus that over the samples left out. The
     predicted samples' coordinates Q = (Phi_pred - mu) V are formed when
-    needed (_fold_q), so that they are not held for every bandwidth."""
+    needed (_fold_q), so that they are not held for every bandwidth.
+    Forming the Gram matrix by subtraction loses precision when the spectrum
+    spans many orders of magnitude, and some LAPACK builds then fail to
+    converge; the same eigenvalues and vectors are then taken from the
+    singular value decomposition of the centred factor over the fitting
+    samples, which is backward stable (Golub and Van Loan, 2013)."""
     sq = np.sqrt(s)
     drop = np.setdiff1d(np.arange(n), fit, assume_unique=True)
     Phi_drop = U[drop] * sq
     mu = -Phi_drop.sum(axis=0) / fit.size
     gram = np.diag(s) - Phi_drop.T @ Phi_drop - fit.size * np.outer(mu, mu)
-    e, V = np.linalg.eigh((gram + gram.T) / 2.0)
+    try:
+        e, V = np.linalg.eigh((gram + gram.T) / 2.0)
+    except np.linalg.LinAlgError:
+        e, V = _fold_spectrum_by_svd(U[fit] * sq - mu)
     return pred, fit, np.maximum(e, 0.0), V, mu
+
+
+def _fold_spectrum_by_svd(Phi_c: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Eigenvalues (ascending, as eigh returns them) and eigenvectors of
+    Phi_c' Phi_c from the thin singular value decomposition of Phi_c, with
+    zero eigenvalues for the directions Phi_c does not span when it has fewer
+    rows than columns (an orthonormal completion of the basis)."""
+    r = Phi_c.shape[1]
+    _, sv, Vt = np.linalg.svd(Phi_c, full_matrices=False)
+    V = Vt.T
+    if V.shape[1] < r:
+        Q, _ = np.linalg.qr(V, mode="complete")
+        V = np.column_stack([V, Q[:, V.shape[1]:]])
+        sv = np.concatenate([sv, np.zeros(r - sv.size)])
+    order = np.argsort(sv ** 2, kind="stable")
+    return (sv ** 2)[order], V[:, order]
 
 
 def _fold_q(s: np.ndarray, U: np.ndarray, pred: np.ndarray, V: np.ndarray, mu: np.ndarray) -> np.ndarray:
@@ -476,27 +470,6 @@ class ConditioningRegression:
         b, lam, _ = self._fit(T, T.shape[1])
         s = self.spectra[b][0]
         return float(np.sum(s / (s + lam)))
-
-    def residuals_by_group(self, target: np.ndarray, groups: list) -> np.ndarray:
-        """Cross-fitted residuals of `target` (n, r), each group of its
-        columns with its own bandwidth and penalty, chosen to minimize the
-        blocked cross-validation error summed over that group's columns."""
-        T = as2d(np.asarray(target, dtype=float))
-        Yc = T - T.mean(axis=0)
-        err = np.zeros((len(self.spectra), len(RIDGE_PENALTIES), Yc.shape[1]))
-        for b, (s, U, _, folds, _) in enumerate(self.spectra):
-            for pred, _, g, Q, a, e in self._fold_terms(Yc, s, U, folds, self.n):
-                for j, lam in enumerate(RIDGE_PENALTIES):
-                    err[b, j] += np.sum((a - Q @ (g / (e + lam)[:, None])) ** 2, axis=0)
-        resid = np.empty_like(Yc)
-        for cols in groups:
-            cols = list(cols)
-            total = err[:, :, cols].sum(axis=2)
-            b, j = np.unravel_index(int(np.argmin(total)), total.shape)
-            s, U, _, folds, _ = self.spectra[b]
-            resid[:, cols] = self._residuals_at(self._fold_terms(Yc[:, cols], s, U, folds, self.n),
-                                                RIDGE_PENALTIES[j], (Yc.shape[0], len(cols)))
-        return resid
 
     def residuals(self, target: np.ndarray, extra: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None]:
         """Cross-fitted residuals of `target` (n, r) and, with the same
