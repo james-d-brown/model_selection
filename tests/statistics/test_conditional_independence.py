@@ -171,7 +171,7 @@ def test_local_permutation_test_holds_its_level_with_two_conditioning_variables(
         z = rng.normal(size=(n, 2))
         s = z.sum(axis=1, keepdims=True)
         c, o = s + rng.normal(size=(n, 1)), s + rng.normal(size=(n, 1))
-        r = CMITest(k_fraction=0.2, workers=1).run({"c": c}, o, z, B, rng, np.arange(n), 0)
+        r = CMITest(k=30, n_neighbors=5, workers=1).run({"c": c}, o, z, B, rng, np.arange(n), 0)
         rejected += (1 + np.sum(r.null[:, 0] >= r.observed[0])) / (B + 1) < 0.05
     assert rejected / reps <= 0.10
 

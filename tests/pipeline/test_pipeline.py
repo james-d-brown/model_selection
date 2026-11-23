@@ -385,6 +385,7 @@ def test_pathways_use_the_largest_decorrelation_lag():
     hf = run_high_flow_analysis(basin, sel, events=EventConfig(method="wasp", high_flow_quantile=0.90),
                                 rng=np.random.default_rng(3))
     prepared = {k: dependence_series(s.values, index=s.index, seasonal=True) for k, s in basin.formulations.items()}
+    prepared["observations"] = dependence_series(basin.obs.values, index=basin.obs.index, seasonal=True)
     lag_hf, _ = max_decorrelation_lag(prepared, sel.dependence_run_length)
     assert hf.min_temporal_lag == lag_hf  # the preparation is deterministic
     pooled = run_pooled_analysis(basin, sel, rng=np.random.default_rng(4))

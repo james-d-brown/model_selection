@@ -3,7 +3,7 @@ Correlograms of the series that set the dependence lag, and of the same
 series before any transformation.
 
 The dependence lag (docs/methods.md, Dependence between samples) is the largest
-Politis decorrelation lag across the formulations' series prepared for it
+Politis decorrelation lag across the formulations' and the observations' series prepared for it
 (preprocessing.transforms.dependence_series). The upper panel draws each such series' sample
 autocorrelation against lag in days, on a logarithmic axis so that hours to
 years appear together, with the significance band that defines the
@@ -13,8 +13,8 @@ long-memory component remains, and whether periodic structure remains after
 the adjustment for the time of year. The lower panel draws the same for the
 flows as supplied (no transform, no seasonal adjustment), so the
 effect of the transformations on the decorrelation can be
-seen; it plays no part in the analysis. The observations are drawn for
-comparison only; they play no part in the dependence lag.
+seen; it plays no part in the analysis. The observations are drawn dotted;
+their decorrelation lag counts towards the dependence lag like any other.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from model_selection.statistics.significance.block_length import (
     C_THRESHOLD, DEFAULT_RUN_LENGTH, _autocovariances, estimate_dependence, searched_lags,
 )
 
-OBS_LABEL = "observations (for comparison)"
+OBS_LABEL = "observations"
 
 
 def _correlograms(fig: go.Figure, row: int | None, series: dict[str, np.ndarray], observations,
@@ -57,8 +57,7 @@ def _correlograms(fig: go.Figure, row: int | None, series: dict[str, np.ndarray]
                                  name=name if is_obs else f"{name}"), **where)
         fig.add_trace(go.Scatter(x=[lag * step_hours / 24.0] * 2, y=[-1, 1], mode="lines", legendgroup=name,
                                  showlegend=False, hovertemplate=f"{name}: decorrelation lag %{{x:.0f}} d<extra></extra>",
-                                 line=dict(width=1.5, dash="dash", color=color),
-                                 visible=None if not is_obs else False), **where)
+                                 line=dict(width=1.5, dash="dash", color=color)), **where)
         if not is_obs:
             band = C_THRESHOLD * np.sqrt(np.log10(n_obs) / n_obs)
     if band is not None:
@@ -78,8 +77,8 @@ def plot_dependence(prepared: dict[str, np.ndarray], step_hours: float, gage: st
                     observations: np.ndarray | None = None, run_length: int = DEFAULT_RUN_LENGTH,
                     seasonal: bool = False, raw: dict[str, np.ndarray] | None = None,
                     raw_observations: np.ndarray | None = None) -> go.Figure:
-    """Correlograms of the formulation series from which the dependence lag
-    is estimated (and, dotted, the observations prepared the same way), with
+    """Correlograms of the series from which the dependence lag is
+    estimated: the formulations and, dotted, the observations, with
     the band and lags described in the module docstring; with `raw`, a second
     panel of the same for the flows as supplied. seasonal: whether the series
     were adjusted for the time of year (preprocessing.transforms.
@@ -95,7 +94,9 @@ def plot_dependence(prepared: dict[str, np.ndarray], step_hours: float, gage: st
     else:
         wrap = lambda text: "<br>".join(textwrap.wrap(text, 150))   # long lists of lags would run off the page
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.11, subplot_titles=(
-            wrap(f"As used for the dependence lag ({prepared_as}). Decorrelation lags: " + _lag_text(prepared, step_hours, run_length)),
+            wrap(f"As used for the dependence lag ({prepared_as}). Decorrelation lags: "
+                 + _lag_text({**prepared, **({OBS_LABEL: observations} if observations is not None else {})},
+                             step_hours, run_length)),
             wrap("Flow as supplied, before any transformation. Decorrelation lags: "
                  + _lag_text(raw, step_hours, run_length))))
         band = _correlograms(fig, 1, prepared, observations, step_hours, run_length, True)
@@ -121,7 +122,7 @@ def plot_dependence(prepared: dict[str, np.ndarray], step_hours: float, gage: st
                 "lag. Lower panel: the same flows as supplied, for comparison only; it plays no part in the analysis. ")
                + "Black dotted band: significance of an autocorrelation at the record's length"
                + (f" (±{band:.3g})" if band is not None else "")
-               + ". Dashed lines, in each formulation's colour: its decorrelation lag, the first lag after which "
+               + ". Dashed lines, in each series' colour (black for the observations): its decorrelation lag, the first lag after which "
                "its autocorrelation stays inside the band (5 lags in a row). Grey: whole years.")
     fig.add_annotation(
         xref="paper", yref="paper", x=0, y=1.06 if raw is not None else 1.02, xanchor="left", yanchor="bottom",

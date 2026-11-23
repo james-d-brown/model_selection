@@ -23,9 +23,9 @@ tied, so a point mass stays one value, and no other ties are created. Ranks
 equal distances, which the Mesner-Shalizi estimator counts as it counts a
 point mass. Ties are not broken with noise, which would make the estimator
 inconsistent (Gao et al., 2017). The local permutation's neighbour search in
-Z uses the ranks of Z, as in Runge (2018), tied values sharing their average
-rank: it counts nothing at a boundary distance, so rank ties there only
-leave the order among equidistant neighbours arbitrary.
+Z uses the same standardized values, so that the null keeps the candidate's
+dependence on Z in the space in which the estimator measures it (Runge,
+2018, uses one space, the ranks, for both).
 With Z empty, a time-block permutation is used, with blocks as long as the
 dependence of the products of the candidate and the observations on evenly
 spaced samples: the shorter of the two series' decorrelation lags
@@ -40,7 +40,6 @@ See docs/methods.md, Free-form tier.
 from __future__ import annotations
 
 import numpy as np
-from scipy.stats import rankdata
 
 from model_selection.statistics.association.information import CachedCMI
 from model_selection.statistics.conditional_independence.base import ConditionalIndependenceTest, JointTestResult
@@ -48,13 +47,6 @@ from model_selection.statistics.significance.neighborhood import compute_neighbo
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH, resolve_block, samples_independent
 from model_selection.statistics.significance.resampling import time_block_permutation
 from model_selection.utils import as2d
-
-
-def ranks(X: np.ndarray) -> np.ndarray:
-    """Each column of X replaced by the ranks of its values, 1 to n; tied
-    values share their average rank."""
-    X = as2d(X)
-    return np.column_stack([rankdata(X[:, j], method="average") for j in range(X.shape[1])]).astype(float)
 
 
 def standardize(X: np.ndarray) -> np.ndarray:
@@ -69,11 +61,11 @@ class CMITest(ConditionalIndependenceTest):
     """Nearest-neighbour conditional mutual information (Mesner and Shalizi,
     2021) with a local-permutation null.
 
-    k_fraction : estimator neighbour count as a fraction of n (Runge, 2018:
-        0.1 to 0.2); k, if given, fixes the count instead.
+    k : estimator neighbour count, fixed and small (Kraskov et al., 2004;
+        Gao et al., 2018; Holmes and Nemenman, 2019); at most n - 1.
     n_neighbors : local-permutation neighbourhood size, counting the sample
-        itself, which may keep its own value (Runge, 2018: 5 to 10; 5 is the
-        default of his implementation, tigramite's CMIknn). At least 2.
+        itself, which may keep its own value; 2, the sample and its nearest
+        neighbour in Z (Kim et al., 2022; Runge, 2018). At least 2.
     run_length : decorrelation-lag run length for the block permutation used
         when Z is empty (docs/methods.md, Dependence between samples).
     theiler_window : neighbours closer than this in time are not
@@ -83,22 +75,21 @@ class CMITest(ConditionalIndependenceTest):
     """
     name = "cmi"
 
-    def __init__(self, k: int | None = None, k_fraction: float = 0.1, n_neighbors: int = 5, workers: int = -1,
+    def __init__(self, k: int = 5, n_neighbors: int = 2, workers: int = -1,
                  run_length: int = DEFAULT_RUN_LENGTH, theiler_window: int | None = None):
         if n_neighbors < 2:
             raise ValueError("n_neighbors counts the sample itself and must be at least 2")
         self.run_length = run_length
         self.theiler_window = theiler_window
+        if k < 1:
+            raise ValueError("k must be at least 1")
         self.k = k
-        self.k_fraction = k_fraction
         self.n_neighbors = n_neighbors
         self.workers = workers
 
     def estimator_k(self, n: int) -> int:
         """Neighbour count used for a sample of size n."""
-        if self.k is not None:
-            return self.k
-        return max(1, min(n - 1, int(round(self.k_fraction * n))))
+        return max(1, min(n - 1, self.k))
 
     def _permuter(self, conditioning, n, time_positions, dependence_lag):
         if conditioning is None:
@@ -139,7 +130,7 @@ class CMITest(ConditionalIndependenceTest):
         else:
             dependence = samples_independent(time_positions, [obs] + [candidates[nm] for nm in names],
                                              self.run_length, grid_step)
-        permute = self._permuter(None if conditioning is None else ranks(conditioning), n, time_positions,
+        permute = self._permuter(scaled_conditioning, n, time_positions,
                                  dependence_lag if block is None else block)
         return scaled, scaled_conditioning, names, n, k, estimator, observed, block, dependence, permute
 

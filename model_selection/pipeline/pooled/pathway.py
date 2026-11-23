@@ -135,13 +135,18 @@ def run_pooled_analysis(
                   for name, s in basin.formulations.items()}
     min_temporal_lag = selection.min_temporal_lag
     if min_temporal_lag is None:
-        min_temporal_lag, per_formulation = max_decorrelation_lag(lag_series, selection.dependence_run_length)
+        # The observations' series counts too: a lag that separates samples must span the dependence of
+        # every series a test uses (docs/methods.md, Dependence lag).
+        obs_lag_series = dependence_series(basin.obs.values.astype(float), index=basin.obs.index,
+                                           seasonal=seasonal.enabled)
+        min_temporal_lag, per_formulation = max_decorrelation_lag({**lag_series, "observations": obs_lag_series},
+                                                                  selection.dependence_run_length)
         notes.append(
             f"min_temporal_lag (dependence lag) auto-estimated as {min_temporal_lag} timesteps: the largest "
-            "Politis decorrelation lag across the simulated formulations, each as analysed (standardized signed "
-            "square root of flow)"
+            "Politis decorrelation lag across the simulated formulations and the observations, each as analysed "
+            "(standardized signed square root of flow)"
             + (" minus its fit on the seasonal phase" if seasonal.enabled else "")
-            + " (obs-free; " + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
+            + " (" + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
             + "); pass min_temporal_lag explicitly to override."
         )
     else:

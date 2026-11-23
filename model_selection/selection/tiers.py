@@ -338,7 +338,7 @@ def build_tier(
         else:
             tier.diagnostic_plots = [p for p in (plot("state_independence"),) if p is not None]
     elif name == "cmi":
-        tier = Tier("cmi", CMITest(k=selection.cmi_k, k_fraction=selection.cmi_k_fraction,
+        tier = Tier("cmi", CMITest(k=selection.cmi_k,
                                    n_neighbors=selection.n_neighbors, workers=workers,
                                    run_length=run, theiler_window=selection.theiler_window), floor)
         if selection.cmi_calibration:

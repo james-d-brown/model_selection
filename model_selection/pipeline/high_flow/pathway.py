@@ -256,14 +256,17 @@ def run_high_flow_analysis(
     if min_temporal_lag is None:
         prepared = {name: dependence_series(s.values.astype(float), index=s.index, seasonal=seasonal.enabled)
                     for name, s in basin.formulations.items()}
+        # The observations' series counts too (docs/methods.md, Dependence lag).
+        prepared["observations"] = dependence_series(basin.obs.values.astype(float), index=basin.obs.index,
+                                                     seasonal=seasonal.enabled)
         min_temporal_lag, per_formulation = max_decorrelation_lag(prepared, selection.dependence_run_length)
         prep = ("each as analysed (standardized signed square root of flow) minus its fit on the seasonal phase"
                 if seasonal.enabled else "each as analysed (standardized signed square root of flow), with its "
                 "seasonal cycle")
         notes.append(
             f"min_temporal_lag (dependence lag) auto-estimated as {min_temporal_lag} timesteps: the largest "
-            f"Politis decorrelation lag across the simulated formulations, as in the pooled pathway: {prep} "
-            "(obs-free; " + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
+            f"Politis decorrelation lag across the simulated formulations and the observations, as in the pooled "
+            f"pathway: {prep} (" + ", ".join(f"{k}={v}" for k, v in per_formulation.items())
             + "); pass min_temporal_lag explicitly to override."
         )
     else:

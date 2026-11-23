@@ -49,9 +49,9 @@ class SelectionConfig:
     alpha : significance level.
     effect_size_floor : minimum bias-corrected effect size for acceptance on
         the R^2-like scale; converted to nats for CMI.
-    min_temporal_lag : dependence lag in timesteps; None estimates it
-        obs-free as the largest Politis decorrelation lag of the
-        formulations. Resampling of samples on a regular time grid uses a
+    min_temporal_lag : dependence lag in timesteps; None estimates it as
+        the largest Politis decorrelation lag of the formulations and the
+        observations. Resampling of samples on a regular time grid uses a
         bandwidth estimated within each test instead (docs/methods.md,
         Dependence between samples).
     dependence_run_length : number of consecutive statistically insignificant
@@ -61,14 +61,16 @@ class SelectionConfig:
         not against cycles, and is counted in samples, so its duration in
         time depends on the sampling interval (docs/methods.md, Dependence
         between samples).
-    cmi_k_fraction : the CMI estimator's neighbour count as a fraction of
-        the sample size, k = max(1, round(cmi_k_fraction * n)); Runge (2018)
-        recommends 0.1 to 0.2 (docs/methods.md, Free-form tier).
-    cmi_k : fixed neighbour count overriding cmi_k_fraction; None (default)
-        uses the fraction.
+    cmi_k : the CMI estimator's neighbour count, fixed and small so that
+        the neighbourhoods stay local and shrink as the sample grows
+        (Kraskov et al., 2004; Gao et al., 2018; Holmes and Nemenman, 2019);
+        5, the size of the local permutation's neighbourhood (Runge, 2018).
+        At most n - 1 on a sample of n (docs/methods.md, Free-form tier).
     n_neighbors : local-permutation neighbourhood size (CMI tier), counting
-        the sample itself, which may keep its own value; Runge (2018)
-        recommends 5 to 10, and 5 is his implementation's default.
+        the sample itself, which may keep its own value: 2, the sample and its
+        nearest neighbour, so that the permutation needs the least smoothness
+        of C's distribution in Z (Kim et al., 2022); small neighbourhoods make
+        the null conservative (Runge, 2018).
     theiler_window : the CMI tier's Theiler window: neighbours closer than
         this in time are not local-permutation partners (Theiler, 1986).
         None (default) uses the dependence lag. The high-flow event pathway sets a
@@ -129,9 +131,8 @@ class SelectionConfig:
     effect_size_floor: float = 0.02
     dependence_run_length: int = DEFAULT_RUN_LENGTH
     min_temporal_lag: int | None = None
-    cmi_k_fraction: float = 0.1
-    cmi_k: int | None = None
-    n_neighbors: int = 5
+    cmi_k: int = 5
+    n_neighbors: int = 2
     theiler_window: int | None = None
     cmi_max_n: int = 2000
     nonlinear_max_n: int = field(default_factory=lambda: DEFAULT_NONLINEAR_MAX_N)
@@ -146,8 +147,8 @@ class SelectionConfig:
     def __post_init__(self):
         if self.measure not in SUPPORTED_MEASURES:
             raise ValueError(f"measure must be one of {SUPPORTED_MEASURES} -- got {self.measure!r}")
-        if not 0.0 < self.cmi_k_fraction < 1.0:
-            raise ValueError(f"cmi_k_fraction must be in (0, 1) -- got {self.cmi_k_fraction}")
+        if self.cmi_k < 1:
+            raise ValueError(f"cmi_k must be at least 1 -- got {self.cmi_k}")
         if self.nonlinear_rank is not None and self.nonlinear_rank < 1:
             raise ValueError(f"nonlinear_rank must be None or at least 1 -- got {self.nonlinear_rank}")
         if self.n_jobs is not None and self.n_jobs < 1:

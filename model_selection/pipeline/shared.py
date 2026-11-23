@@ -91,9 +91,10 @@ def zero_flow_check(basin: BasinData, notes: list[str]) -> tuple[dict[str, float
 
 def max_decorrelation_lag(series_by_name: dict[str, np.ndarray], run_length: int) -> tuple[int, dict[str, int]]:
     """The dependence lag (timesteps): the largest Politis decorrelation lag
-    across the formulations' series, observation-free, with each
-    formulation's value. The largest is used because a lag that separates
-    samples should be chosen generously (Hegger et al., 1999). The series are
+    across the series given (the formulations' and the observations'), with
+    each series' value. The largest is used because a lag that separates
+    samples must span the dependence of every series a test uses, and should
+    be chosen generously (Hegger et al., 1999). The series are
     on the regular grid; NaN marks missing values, which the estimate skips
     (docs/methods.md, Dependence between samples)."""
     from model_selection.statistics.significance.block_length import estimate_dependence
