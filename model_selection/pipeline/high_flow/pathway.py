@@ -256,7 +256,7 @@ def run_high_flow_analysis(
     if min_temporal_lag is None:
         prepared = {name: dependence_series(s.values.astype(float), index=s.index, seasonal=seasonal.enabled)
                     for name, s in basin.formulations.items()}
-        # The observations' series counts too (docs/methods.md, Dependence lag).
+        # The observations' series counts too (docs/methods.md, Dependence between samples).
         prepared["observations"] = dependence_series(basin.obs.values.astype(float), index=basin.obs.index,
                                                      seasonal=seasonal.enabled)
         min_temporal_lag, per_formulation = max_decorrelation_lag(prepared, selection.dependence_run_length)

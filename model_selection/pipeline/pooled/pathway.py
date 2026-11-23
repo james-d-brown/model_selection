@@ -136,7 +136,7 @@ def run_pooled_analysis(
     min_temporal_lag = selection.min_temporal_lag
     if min_temporal_lag is None:
         # The observations' series counts too: a lag that separates samples must span the dependence of
-        # every series a test uses (docs/methods.md, Dependence lag).
+        # every series a test uses (docs/methods.md, Dependence between samples).
         obs_lag_series = dependence_series(basin.obs.values.astype(float), index=basin.obs.index,
                                            seasonal=seasonal.enabled)
         min_temporal_lag, per_formulation = max_decorrelation_lag({**lag_series, "observations": obs_lag_series},

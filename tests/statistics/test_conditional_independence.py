@@ -183,14 +183,18 @@ def test_local_permutation_keeps_own_value_without_neighbours():
     assert index.tolist() == [0, 1, 2, 3]
 
 
-def test_cmi_neighbour_count_scales_with_sample_size():
+def test_cmi_neighbour_count_is_fixed():
+    """The estimator's neighbour count is fixed (k = 5), so neighbourhoods
+    shrink as the sample grows; it is capped at n - 1 on tiny samples."""
     t = CMITest(workers=1)
-    assert [t.estimator_k(n) for n in (20, 60, 200, 2000)] == [2, 6, 20, 200]
-    assert CMITest(k=5).estimator_k(2000) == 5
+    assert [t.estimator_k(n) for n in (4, 20, 200, 2000)] == [3, 5, 5, 5]
+    assert CMITest(k=8).estimator_k(2000) == 8
+    with pytest.raises(ValueError):
+        CMITest(k=0)
     rng = np.random.default_rng(12)
     c, o, z = _data(rng, n=80)
     res = t.run(c, o, z, 10, rng, np.arange(80), 0)
-    assert res.diagnostics["dup"]["estimator_k"] == 8
+    assert res.diagnostics["dup"]["estimator_k"] == 5
 
 
 def test_permutation_p_value_is_exact_and_never_zero():

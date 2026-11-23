@@ -732,8 +732,8 @@ def test_wasp_flags_a_series_whose_scale_range_is_too_short():
 @pytest.mark.integration
 def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
     """With the decorrelation length as the rule for dependence between
-    events, where the dependence lag would leave an event fewer than five
-    permutation partners, the high-flow event pathway shortens the free-form tier's
+    events, where the dependence lag would leave an event fewer permutation
+    partners than its neighbourhood needs, the high-flow event pathway shortens the free-form tier's
     Theiler window; the selection sample keeps the full dependence lag, which
     every other test uses. With clusters there is nothing to shorten: only an
     event's own cluster is excluded."""
@@ -747,8 +747,10 @@ def test_crowded_events_shorten_only_the_theiler_window(monkeypatch):
 
     monkeypatch.setattr(pathway_module, "run_selection_stage", spy)
     # 15 events in 3000 hours: a 1200-hour lag leaves each event few partners outside it.
+    # A neighbourhood of 5 needs 4 partners, so the window must shorten (the default of 2 needs one).
     result = run_high_flow_analysis(make_synthetic_basin(n_hours=3000, n_events=15),
-                                    SelectionConfig(measure="linear", n_permutations=20, min_temporal_lag=1200),
+                                    SelectionConfig(measure="linear", n_permutations=20, min_temporal_lag=1200,
+                                                    n_neighbors=5),
                                     events=EventConfig(dependence="lag"), rng=np.random.default_rng(3))
     assert captured["lag"] == 1200
     assert captured["window"] is not None and captured["window"] < 1200
