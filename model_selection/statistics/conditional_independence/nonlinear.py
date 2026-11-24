@@ -78,6 +78,12 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         self.run_length = run_length
         self._factors: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
         self._censored: dict[tuple[int, int], tuple] = {}
+        self._uncensored: dict[tuple[int, int], tuple] = {}
+        """Uncensored scalar variables' feature means (location-scale smearing),
+        by ids of the variable and the regression: the significance test and
+        the effect size, and the rounds and comparisons, recur on the same
+        pairs. A cached entry is the computation it replaces (it uses no
+        random numbers)."""
         self._paths: dict[int, tuple] = {}
         """How each censored variable's conditional means were estimated, with
         the scale and pool diagnostics, by id of the variable."""
@@ -146,7 +152,13 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             return L - L.mean(axis=0), own, 0.0
         record = censoring_record(X)
         if record is None and self.uncensored_feature_means != "regression" and as2d(X).shape[1] == 1:
-            means, mean, _ = censored_feature_means(X, L, as2d(X)[:, 0], None, regression)
+            key = (id(X), id(regression))
+            cached = self._uncensored.get(key)
+            if cached is None or cached[0] is not X or cached[1] is not regression or cached[2] is not L:
+                means, mean, _ = censored_feature_means(X, L, as2d(X)[:, 0], None, regression)
+                cached = (X, regression, L, means, mean)
+                self._uncensored[key] = cached
+            means, mean = cached[3], cached[4]
             E, E_own = L - means, _own_residuals(X, mean)
         elif record is None:
             E, E_own = regression.residuals(L, own)
@@ -238,14 +250,16 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         if ew.shape[1] == 0:
             effect = half = corr = 0.0
         else:
-            h, nested = _ridge_direction(ew, designs, folds, time_positions, dependence_lag)
+            chosen: list = []
+            h, nested = _ridge_direction(ew, designs, folds, time_positions, dependence_lag, chosen)
             effect = _error_reduction(ew, h)
             # The refit at half the rank feeds only the rank-cap flag, so it is
-            # made only when a factor reached the cap (low_rank_material).
+            # made only when a factor reached the cap (low_rank_material). It
+            # keeps each block's bandwidth and penalty, so that it measures the
+            # rank alone, not a second choice of tuning.
             half = effect
             if cap_share > 0:
-                h_half, _ = _ridge_direction(ew, [G[:, :max(1, G.shape[1] // 2)] for G in designs], folds,
-                                             time_positions, dependence_lag)
+                h_half = _ridge_refit(ew, [G[:, :max(1, G.shape[1] // 2)] for G in designs], folds, chosen)
                 half = _error_reduction(ew, h_half)
             corr = _held_out_r2(ew[:, 0], h[:, 0], folds) if ew.shape[1] == 1 else float("nan")
         return {"features": effect, "features_half": half, "features_corr": corr,
@@ -537,7 +551,7 @@ def _tuning_groups(folds: list, time_positions: np.ndarray, dependence_lag: floa
 
 
 def _ridge_direction(e: np.ndarray, designs: list, folds: list, time_positions: np.ndarray,
-                     dependence_lag: float) -> tuple[np.ndarray, bool]:
+                     dependence_lag: float, choices: list | None = None) -> tuple[np.ndarray, bool]:
     """(held-out predictions of e, whether the tuning was nested): ridge
     regression of e on one of `designs` (one per bandwidth), each block
     predicted by a fit on its fold's fitting samples.
@@ -557,7 +571,10 @@ def _ridge_direction(e: np.ndarray, designs: list, folds: list, time_positions: 
     Each block's Gram matrix, and each segment's, is formed once; a fit's
     Gram matrix is the total less those it leaves out, and its
     eigendecomposition gives the coefficients for every penalty, and serves
-    both groups whose exclusions it combines."""
+    both groups whose exclusions it combines.
+
+    choices: when given, a list that receives, for each block, the (design,
+    penalty) indices used to predict it (for _ridge_refit)."""
     e2 = e if e.ndim == 2 else e[:, None]
     designs = [X for X in designs if X.shape[1] > 0]
     if not designs:
@@ -609,14 +626,52 @@ def _ridge_direction(e: np.ndarray, designs: list, folds: list, time_positions: 
         total = np.array([[sum(((e2[rows[i]][:, :, None] - full[d][i]) ** 2).sum((0, 1)) for i in range(K))]
                           for d in range(len(designs))])[:, 0, :]
         d, j = np.unravel_index(int(np.argmin(total)), total.shape)
-        for i in range(K):
-            out[rows[i]] = full[d][i][:, :, j]
+        chosen = [(int(d), int(j))] * K
     else:
+        chosen = [None] * K
         for g, blocks in enumerate(groups):
             d, j = np.unravel_index(int(np.argmin(err[g])), err[g].shape)
             for i in blocks:
-                out[rows[i]] = full[d][i][:, :, j]
+                chosen[i] = (int(d), int(j))
+    for i, (d, j) in enumerate(chosen):
+        out[rows[i]] = full[d][i][:, :, j]
+    if choices is not None:
+        choices.extend(chosen)
     return (out if e.ndim == 2 else out[:, 0]), nested
+
+
+def _ridge_refit(e: np.ndarray, designs: list, folds: list, choices: list) -> np.ndarray:
+    """Held-out predictions of e by ridge regression with the design and
+    penalty chosen for each block by _ridge_direction (choices), on other
+    designs of the same order, such as the same factors at half the rank:
+    each block predicted by a fit on its fold's fitting samples, with no
+    tuning. The refit then differs from the original only through the
+    designs."""
+    e2 = e if e.ndim == 2 else e[:, None]
+    designs = [X for X in designs if X.shape[1] > 0]
+    out = np.zeros_like(e2)
+    if not designs:
+        return out if e.ndim == 2 else out[:, 0]
+    rows = [p for p, _ in folds]
+    n, K = e2.shape[0], len(rows)
+    label = np.full(n, -1)
+    for k, r in enumerate(rows):
+        label[r] = k
+    left_out = []
+    for _, fit in folds:
+        keep = np.zeros(n, bool)
+        keep[fit] = True
+        left_out.append([int(m) for m in np.unique(label[~keep])])
+    for d in sorted({c[0] for c in choices}):
+        X = designs[d]
+        Gb = [X[r].T @ X[r] for r in rows]
+        cb = [X[r].T @ e2[r] for r in rows]
+        Gt, ct = sum(Gb), sum(cb)
+        for i in (i for i in range(K) if choices[i][0] == d):
+            coef = _ridge_coefficients(Gt - sum((Gb[m] for m in left_out[i]), np.zeros_like(Gt)),
+                                       ct - sum((cb[m] for m in left_out[i]), np.zeros_like(ct)))
+            out[rows[i]] = _predict(X[rows[i]], coef)[:, :, choices[i][1]]
+    return out if e.ndim == 2 else out[:, 0]
 
 
 def _error_reduction(e: np.ndarray, h: np.ndarray) -> float:

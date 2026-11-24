@@ -31,11 +31,13 @@ Selection stops at the first winner not accepted.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from model_selection.selection.tiers import SelectionSample, Tier
+from model_selection.timing import elapsed_since, timed
 from model_selection.statistics.power import effective_sample_size
 from model_selection.statistics.conditional_independence import LinearResidualTest
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH
@@ -160,6 +162,8 @@ class SelectionResult:
     by the backward pass (selection.backward), which may remove some of
     them; `selected` is then the final set."""
     backward: list[dict] = field(default_factory=list)
+    timings: list[dict] = field(default_factory=list)
+    """Wall-clock seconds of each stage of the analysis (model_selection.timing)."""
     """One record per test of the backward pass (selection.backward); empty
     when it was not run."""
     equivalence: list[dict] = field(default_factory=list)
@@ -354,8 +358,9 @@ def greedy_forward_selection(
 
         logger.info(f"[*] Round {round_no} ({tier.name} tier): testing {len(remaining)} candidates "
                     f"with {n_permutations} resamples.")
-        result = tier.test.run({c: candidates[c] for c in remaining}, obs, z, n_permutations, rng,
-                               time_positions, lag, grid_step=sample.grid_step, period_starts=sample.period_starts)
+        with timed(f"{tier.name} round {round_no}: significance test of {len(remaining)} candidates"):
+            result = tier.test.run({c: candidates[c] for c in remaining}, obs, z, n_permutations, rng,
+                                   time_positions, lag, grid_step=sample.grid_step, period_starts=sample.period_starts)
         smallest = (result.dependence or {}).get("smallest_p_value")
         if smallest is not None and smallest >= alpha:
             # Too few independent units (clusters of events) for the sign-flip
@@ -394,12 +399,13 @@ def greedy_forward_selection(
             return tier.test.magnitude(candidates[nm], obs, z, time_positions, lag, float(result.observed[k]),
                                        result.width_draws(k), grid_step=sample.grid_step,
                                        period_starts=sample.period_starts)
-        if hasattr(tier.test, "magnitudes"):
-            # The test pools the eigendecompositions of all these effect sizes (nonlinear tier).
-            effects = tier.test.magnitudes({nm: candidates[nm] for nm in ranked}, obs, z, time_positions, lag,
-                                           period_starts=sample.period_starts)
-        else:
-            effects = dict(zip(ranked, parallel_map(effect_of, ranked)))
+        with timed(f"{tier.name} round {round_no}: effect sizes of {len(ranked)} candidates"):
+            if hasattr(tier.test, "magnitudes"):
+                # The test pools the eigendecompositions of all these effect sizes (nonlinear tier).
+                effects = tier.test.magnitudes({nm: candidates[nm] for nm in ranked}, obs, z, time_positions, lag,
+                                               period_starts=sample.period_starts)
+            else:
+                effects = dict(zip(ranked, parallel_map(effect_of, ranked)))
         if round_no == 1:
             unconditional_effect = {nm: float(e[0]) for nm, e in effects.items()}
         winner = max(significant or result.names, key=lambda nm: (effects[nm][0], nm))
@@ -458,7 +464,8 @@ def greedy_forward_selection(
 
         # Removal checks come first: a candidate cannot be judged if the selected
         # formulations have not been removed adequately.
-        removal = run_checks("removal")
+        with timed(f"{tier.name} round {round_no}: validity test (linear adjustment)"):
+            removal = run_checks("removal")
         for check, outcome in removal:
             draw(check, winner, _sentence(outcome.decision_reason) + (
                 f" The {tier.name} tier's results may then be invalid, so selection moves to the next tier, which "
@@ -483,14 +490,16 @@ def greedy_forward_selection(
         calibration = None
         if accepted and tier.calibration is not None and z is not None:
             source, censor = sample.surrogate_source(winner)
-            calibration = tier.calibration(source, obs, z, time_positions, lag, rng.spawn(1)[0],
-                                           grid_step=sample.grid_step, period_starts=sample.period_starts,
-                                           **_censor_kwarg(censor))
+            with timed(f"{tier.name} round {round_no}: calibration test"):
+                calibration = tier.calibration(source, obs, z, time_positions, lag, rng.spawn(1)[0],
+                                               grid_step=sample.grid_step, period_starts=sample.period_starts,
+                                               **_censor_kwarg(censor))
             accepted = calibration["calibrated"]
         n_dims = as2d(winner_values).shape[1] + as2d(obs).shape[1] + (0 if z is None else z.shape[1]) + k_partialled
         samples_per_dimension = n / n_dims
         k_y, k_x = as2d(obs).shape[1], as2d(winner_values).shape[1]
         k_c = (0 if z is None else z.shape[1]) + k_partialled
+        t_neff = time.perf_counter()
         if isinstance(tier.test, LinearResidualTest):
             linear_result = result
         else:
@@ -508,6 +517,7 @@ def greedy_forward_selection(
                                                               time_positions, lag, grid_step=sample.grid_step,
                                                               test=linear_result)
         n_eff = effective_sample_size(n, width, k_y, k_x, k_c)
+        elapsed_since(f"{tier.name} round {round_no}: effective sample size", t_neff)
         thinning = (None if sample.thinned_from is None else
                     _thinning_record(sample.thinned_from, selected, winner, n_eff, n, n_permutations,
                                      k_partialled, round_no, getattr(tier.test, "run_length", DEFAULT_RUN_LENGTH)))
@@ -562,7 +572,8 @@ def greedy_forward_selection(
         # spurious escalation has probability at most alpha.
         step = trajectory[-1]
         if accepted:
-            informative = run_checks("relationship")
+            with timed(f"{tier.name} round {round_no}: power tests of the winner (information only)"):
+                informative = run_checks("relationship")
             for check, outcome in informative:
                 draw(check, winner, _sentence(outcome.decision_reason) + (
                     f" '{winner}' was accepted in this round, so this test is recorded for information only and "
@@ -578,7 +589,9 @@ def greedy_forward_selection(
                                        key=lambda nm: (-statistic.get(nm, 0.0), nm))
             for nm in (family if n_relationship else []):
                 departing = None
-                for check, outcome in run_checks("relationship", nm):
+                with timed(f"{tier.name} round {round_no}: power tests of '{nm}'"):
+                    checked = run_checks("relationship", nm)
+                for check, outcome in checked:
                     departs = bool(not outcome.tier_adequate and outcome.p_value < level)
                     if nm == winner:
                         draw(check, winner, (
@@ -615,9 +628,10 @@ def greedy_forward_selection(
                 # whose assumptions hold can make the selection.
                 if tier.escalation_guard is not None and z is not None:
                     source, censor = sample.surrogate_source(nm)
-                    step.cmi_calibration = tier.escalation_guard(
-                        source, obs, z, time_positions, lag, rng.spawn(1)[0], grid_step=sample.grid_step,
-                        period_starts=sample.period_starts, names=(nm, list(selected)), **_censor_kwarg(censor))
+                    with timed(f"{tier.name} round {round_no}: calibration test before escalation"):
+                        step.cmi_calibration = tier.escalation_guard(
+                            source, obs, z, time_positions, lag, rng.spawn(1)[0], grid_step=sample.grid_step,
+                            period_starts=sample.period_starts, names=(nm, list(selected)), **_censor_kwarg(censor))
                     if not step.cmi_calibration["calibrated"]:
                         unsupported = (f"the CMI tier, to which the departure leads, is not calibrated on its "
                                        f"sample ({_calibration_summary(step.cmi_calibration)})")

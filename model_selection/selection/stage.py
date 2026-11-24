@@ -14,6 +14,7 @@ from model_selection.selection.equivalence import (
     equally_supported_sets, formulation_classes, information_equivalence, summarize_sets,
 )
 from model_selection.selection.greedy import SelectionResult, greedy_forward_selection, step_outcome
+from model_selection import timing
 from model_selection.selection.tiers import AdequacyPlotFactory, SelectionSample, Tier, build_cascade, build_tier
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ def run_selection_stage(
         contexts = {t.name: (t, t.sample or sample) for t in tiers}
         _shrink(tiered.selection, committed.sample or sample, committed, selection, rng, contexts)
         _compare_alternatives(tiered.selection, committed.sample or sample, committed, selection, rng, contexts)
+        _attach_timings(tiered.selection)
         return SelectionOutcome(tiered.selection, committed, tiered.committed_tier,
                                 [a.to_record() for a in tiered.attempted_tiers])
 
@@ -76,6 +78,7 @@ def run_selection_stage(
     _assign_outcomes(result, selection)
     _shrink(result, tier.sample or sample, tier, selection, rng)
     _compare_alternatives(result, tier.sample or sample, tier, selection, rng)
+    _attach_timings(result)
     return SelectionOutcome(result, tier)
 
 
@@ -87,6 +90,12 @@ def _assign_outcomes(result: SelectionResult | None, selection: SelectionConfig)
         step.outcome = step_outcome(step, selection.alpha)
 
 
+def _attach_timings(result: SelectionResult | None) -> None:
+    """The wall-clock time of each stage so far (model_selection.timing)."""
+    if result is not None:
+        result.timings = timing.records()
+
+
 def _shrink(result: SelectionResult | None, sample: SelectionSample, tier: Tier, selection: SelectionConfig,
             rng: np.random.Generator, tiers: dict | None = None) -> None:
     """The backward pass (selection.backward), from an independent random
@@ -95,8 +104,9 @@ def _shrink(result: SelectionResult | None, sample: SelectionSample, tier: Tier,
     if result is None:
         return
     if selection.backward_pass and not result.tier_rejected and not result.ill_posed:
-        backward_pass(result, sample, tier, selection.resolved_n_permutations, selection.alpha, rng.spawn(1)[0],
-                      tiers)
+        with timing.timed("backward pass"):
+            backward_pass(result, sample, tier, selection.resolved_n_permutations, selection.alpha,
+                          rng.spawn(1)[0], tiers)
     else:
         result.forward_selected = [st.formulation for st in result.trajectory if st.accepted]
 
@@ -111,11 +121,13 @@ def _compare_alternatives(result: SelectionResult, sample: SelectionSample, tier
     it."""
     if selection.equivalence_checks and result.selected:
         stream = rng.spawn(1)[0]
-        result.equivalence = information_equivalence(result, sample, tier, selection.resolved_n_permutations,
-                                                     selection.alpha, stream, tiers)
-        result.equivalent_sets = equally_supported_sets(result, result.equivalence, sample, tier,
-                                                        selection.resolved_n_permutations, selection.alpha, stream,
-                                                        tiers)
+        with timing.timed("comparisons with the formulations not selected"):
+            result.equivalence = information_equivalence(result, sample, tier, selection.resolved_n_permutations,
+                                                         selection.alpha, stream, tiers)
+        with timing.timed("equally supported sets"):
+            result.equivalent_sets = equally_supported_sets(result, result.equivalence, sample, tier,
+                                                            selection.resolved_n_permutations, selection.alpha,
+                                                            stream, tiers)
         result.classes = formulation_classes(result, result.equivalence, result.equivalent_sets,
                                              list(sample.candidates))
         result.equivalent_sets_summary = summarize_sets(result, result.equivalence, result.equivalent_sets,

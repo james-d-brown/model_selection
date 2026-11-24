@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import logging
 
+import time
+
 import numpy as np
 
 from model_selection.io.basin import BasinData
@@ -105,6 +107,9 @@ def run_pooled_analysis(
     Writes {gage}_pooled_result.json ({gage}_pooled_censored_result.json
     with censoring) when output.output_dir is set.
     """
+    from model_selection import timing
+    timing.reset()
+    t_start = time.perf_counter()
     selection = selection or SelectionConfig()
     adequacy = adequacy or AdequacyConfig()
     output = output or OutputConfig()
@@ -207,6 +212,7 @@ def run_pooled_analysis(
                    f"evenly spaced points, as many as its cap of {caps[tier_name]} allows; its bootstrap accounts "
                    "for their dependence")
             notes.append(f"the {tier_name} tier runs on {len(sub.obs)} of the record's {n} points: {how}.")
+    timing.elapsed_since(f"{label}: preparation (series, dependence lag, samples)", t_start)
     outcome = run_selection_stage(
         sample, selection, adequacy, multivariate=False,
         rng=rng, tier_samples=tier_samples,

@@ -125,9 +125,12 @@ class SelectionConfig:
         factors, which equal the kernels to working precision below the cap
         (docs/methods.md, Nonlinear tier). Their cost grows
         as n * rank^2. None uses exact factors at every size (O(n^3)).
-    n_jobs : threads for the nonlinear tier's independent eigendecompositions
-        (model_selection.parallel); None (default) uses every core, 1 runs
-        them in sequence. Results do not depend on it, apart from rounding.
+    n_jobs : threads for the analysis's independent computations
+        (model_selection.parallel): the candidates' effect sizes, the
+        eigendecompositions and kernel factors a round needs, the
+        comparisons and the checks of equally supported sets. None (default)
+        uses every core, 1 runs them in sequence. Results do not depend on
+        it, apart from rounding.
     """
     measure: str = "cascade"
     n_permutations: int | None = None

@@ -417,7 +417,7 @@ def _review_header(result) -> dict:
 def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> dict:
     keys = ("selected", "forward_selected", "backward", "trajectory", "unconditional_association",
             "unconditional_effect", "stopped_reason", "ill_posed", "ill_posed_reason", "untestable", "equivalence",
-            "equivalent_sets", "equivalent_sets_summary", "classes")
+            "equivalent_sets", "equivalent_sets_summary", "classes", "timings")
     if sel is None:
         return {k: None for k in keys}
     return {
@@ -461,6 +461,7 @@ def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> di
         "equivalent_sets": sel.equivalent_sets,
         "equivalent_sets_summary": sel.equivalent_sets_summary,
         "classes": sel.classes,
+        "timings": sel.timings,
     }
 
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -230,6 +231,9 @@ def run_high_flow_analysis(
     output.output_dir is set. When fewer than two usable events remain,
     selection is skipped and result.selection is None.
     """
+    from model_selection import timing
+    timing.reset()
+    t_start = time.perf_counter()
     selection = selection or SelectionConfig()
     adequacy = adequacy or AdequacyConfig()
     events = events or EventConfig()
@@ -484,6 +488,7 @@ def run_high_flow_analysis(
                         "kernel ridge regression before its least-squares regressions (partially linear model), "
                         f"using {tier_samples['linear'].partialled_df:.1f} effective degrees of freedom, which its "
                         "power calculation counts as conditioning variables.")
+                timing.elapsed_since("high-flow: preparation (events, features, samples)", t_start)
                 outcome = run_selection_stage(
                     sample, dataclasses.replace(selection, n_neighbors=hf_n_neighbors, theiler_window=theiler_window),
                     adequacy,

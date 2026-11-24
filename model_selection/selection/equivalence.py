@@ -74,6 +74,7 @@ import logging
 
 import numpy as np
 
+from model_selection import timing
 from model_selection.parallel import parallel_map
 from model_selection.selection.greedy import SelectionResult, _stack_selected
 from model_selection.selection.tiers import SelectionSample, Tier
@@ -202,7 +203,8 @@ def information_equivalence(
             z_with_c = c_conditioning if z_rest is None else np.hstack([z_rest, c_conditioning])
             reverse = ctx.adds(w, ctx.candidates[w], z_with_c, n_permutations, sub, alpha)
             return {"candidate": c, "relation": _relation(reverse), "selected_adds_beyond_candidate": reverse}
-        comparisons = parallel_map(compare, list(zip(others, stream.spawn(len(others)))))
+        with timing.timed(f"comparisons of '{w}' with {len(others)} formulations ({ctx.tier.name} tier)"):
+            comparisons = parallel_map(compare, list(zip(others, stream.spawn(len(others)))))
         records.append({"selected": w, "given": rest, "tier": ctx.tier.name, "alpha": alpha,
                         "effect_size_floor": ctx.tier.effect_size_floor, "comparisons": comparisons})
         summary = "; ".join(f"{cmp['candidate']}: {cmp['relation'].replace('_', ' ')}" for cmp in comparisons)

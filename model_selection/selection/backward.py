@@ -38,11 +38,13 @@ information (the Markov boundary) needs, in addition, faithfulness
 from __future__ import annotations
 
 import logging
+import time
 
 import numpy as np
 
 from model_selection.selection.equivalence import TierContexts, _contexts
 from model_selection.selection.greedy import SelectionResult
+from model_selection import timing
 from model_selection.selection.tiers import SelectionSample, Tier
 
 logger = logging.getLogger(__name__)
@@ -108,6 +110,7 @@ def backward_pass(
         name = step.tier
         ctx = context_of(name)
         z = ctx.z(others)
+        t_test = time.perf_counter()
         while True:
             checks = _validity_departure(ctx, w, z, streams[2 * i])
             record["validity"].extend(checks)
@@ -128,6 +131,7 @@ def backward_pass(
                           untestable=result["untestable"])
             if result["untestable"]:
                 record["not_tested_reason"] = "too few clusters of events for a p-value below alpha"
+        timing.elapsed_since(f"backward pass: test of '{w}' ({record['tier']} tier)", t_test)
         if record["not_tested_reason"] is None and not record["adds"]:
             record["removed"] = True
             current.remove(w)

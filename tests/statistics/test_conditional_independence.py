@@ -566,6 +566,28 @@ def test_the_effect_sizes_tuning_never_sees_the_block_it_predicts():
     assert nl._ridge_direction(e, [X1, X2], few, t, 80.0)[1] is False
 
 
+def test_the_refit_keeps_each_blocks_tuning():
+    """_ridge_refit predicts each block with the bandwidth (design) and penalty
+    _ridge_direction chose for it: on the same designs it reproduces the
+    tuned predictions, so a refit on half-rank factors differs only through
+    the rank (docs/methods.md, Nonlinear tier, Low-rank kernels)."""
+    import model_selection.statistics.conditional_independence.nonlinear as nl
+    from model_selection.statistics.regression.kernel_residuals import crossfit_blocks, _folds
+    rng = np.random.default_rng(6)
+    n = 400
+    t = np.arange(n, dtype=float)
+    X1, X2 = rng.normal(size=(n, 4)), rng.normal(size=(n, 8))
+    e = X2[:, :2] @ np.array([0.5, -0.5]) + rng.normal(size=n)
+    for lag in (10.0, 80.0):                                        # nested and not nested
+        folds, _ = _folds(*crossfit_blocks(t, lag)[:2], 1)
+        chosen = []
+        h, _ = nl._ridge_direction(e, [X1, X2], folds, t, lag, chosen)
+        assert len(chosen) == len(folds)
+        assert np.allclose(nl._ridge_refit(e, [X1, X2], folds, chosen), h)
+        half = nl._ridge_refit(e, [X1[:, :2], X2[:, :4]], folds, chosen)
+        assert half.shape == h.shape and not np.allclose(half, h)
+
+
 def _tuning_reference(e, designs, folds, t, lag):
     """A direct, slow implementation of the effect size's nested tuning, from
     raw rows: groups of TUNING_WATER_YEARS blocks, each tuned on the other
