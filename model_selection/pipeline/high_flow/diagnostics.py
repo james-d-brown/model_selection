@@ -104,7 +104,8 @@ def basis_sensitivity_check(
     if (selection.ill_posed or selection.tier_rejected or not selection.trajectory
             or selection.trajectory[-1].accepted):
         return None
-    already_selected = list(selection.selected)
+    # The stopping round was tested given the forward selection; the check repeats that round.
+    already_selected = list(selection.forward_selected or selection.selected)
     remaining = sorted(set(raw_formulations) - set(already_selected))
     if not remaining:
         return None

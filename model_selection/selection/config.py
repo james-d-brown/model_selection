@@ -95,11 +95,17 @@ class SelectionConfig:
         it. On by default in both pathways; turning it off saves
         computation (52 surrogate tests per use at alpha = 0.05), and a CMI
         selection made without it is flagged for review.
+    backward_pass : after forward selection, test each selected formulation,
+        in selection order, given the other formulations still selected, and
+        remove it at once if it adds no information (docs/methods.md,
+        Backward pass). At most one test per selected formulation.
     equivalence_checks : after selection, compare each selected formulation
-        with every other candidate in both directions, and report the class
-        of every formulation: distinct, exchangeable, redundant or not tested
-        (docs/methods.md, Interchangeable formulations). Reported only; costs
-        two tests per candidate per accepted round.
+        with every formulation not selected, given the other selected
+        formulations, and report the class of every formulation: distinct,
+        exchangeable, redundant or not tested (docs/methods.md,
+        Interchangeable formulations). Reported only; one test per selected
+        formulation per formulation not selected, plus the tests that verify
+        equally supported sets.
     cmi_calibration_rate_ratio : the CMI tier's calibration on surrogate
         candidates uses as many surrogates as needed to detect, with 80%
         power, a false-acceptance rate this many times alpha
@@ -138,6 +144,7 @@ class SelectionConfig:
     nonlinear_max_n: int = field(default_factory=lambda: DEFAULT_NONLINEAR_MAX_N)
     cmi_calibration: bool = True
     cmi_calibration_rate_ratio: float = 3.0
+    backward_pass: bool = True
     equivalence_checks: bool = True
     min_samples_per_dimension: float = 10.0
     nonlinear_rank: int | None = 2000

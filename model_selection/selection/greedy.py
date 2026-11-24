@@ -155,6 +155,13 @@ class SelectionResult:
     independent clusters of events for any p-value below alpha
     (statistics.significance.clusters); ill_posed_reason says why. The
     selection is then the formulations accepted before that round."""
+    forward_selected: list[str] = field(default_factory=list)
+    """The formulations forward selection accepted, in selection order. Set
+    by the backward pass (selection.backward), which may remove some of
+    them; `selected` is then the final set."""
+    backward: list[dict] = field(default_factory=list)
+    """One record per test of the backward pass (selection.backward); empty
+    when it was not run."""
     equivalence: list[dict] = field(default_factory=list)
     equivalent_sets: list[dict] = field(default_factory=list)
     equivalent_sets_summary: str = ""

@@ -114,22 +114,19 @@ def test_short_crossfit_blocks_and_capped_factors_produce_review_flags():
     assert review_flags(result) == []
 
 
-def test_selected_encompassed_flag_requires_the_rounds_bonferroni_level():
+def test_a_backward_test_that_could_not_be_made_is_flagged():
     result = _pooled(False)
-
-    def record(p):
-        return [{"round": 1, "selected": "m1", "flag_level": 0.05 / 6, "comparisons": [{
-            "candidate": "m2", "relation": "encompasses_selected",
-            "candidate_adds_beyond_selected": {"p_value": p}, "selected_adds_beyond_candidate": {"p_value": 0.4}}]}]
-    result.selection.equivalence = record(0.03)
-    assert "selected_encompassed" not in [f["code"] for f in review_flags(result)]
-    result.selection.equivalence = record(0.001)
-    assert "selected_encompassed" in [f["code"] for f in review_flags(result)]
+    assert "backward_not_tested" not in [f["code"] for f in review_flags(result)]
+    result.selection.backward = [{"formulation": "m0", "given": ["m1"], "removed": False, "adds": None,
+                                  "not_tested_reason": "too few clusters of events for a p-value below alpha"}]
+    flags = [f for f in review_flags(result) if f["code"] == "backward_not_tested"]
+    assert len(flags) == 1 and "'m0'" in flags[0]["message"] and "kept" in flags[0]["message"]
 
 
 def test_outcome_line_states_each_pathway_and_the_union():
     from model_selection.pipeline.results import outcome_line
     pooled = _pooled(False)
+    pooled.selection.selected = ["m1"]                    # the final set, after the backward pass
     pooled.selection.classes = {"distinct": ["m1"], "exchangeable": {}, "not_shown_distinct": {},
                                 "redundant": ["m2"], "not_tested": [], "not_tested_reason": None}
     assert outcome_line(pooled=pooled).startswith("G1: pooled {m1}: m1 distinct")

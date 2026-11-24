@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from model_selection.selection.backward import backward_pass
 from model_selection.selection.cascade import run_tiered_selection
 from model_selection.selection.config import CASCADE, AdequacyConfig, SelectionConfig
 from model_selection.selection.equivalence import (
@@ -61,8 +62,9 @@ def run_selection_stage(
         logger.info(f"[+] Completed tiered selection ({label}): committed tier {tiered.committed_tier}")
         committed = next(t for t in tiers if t.name == tiered.committed_tier)
         _assign_outcomes(tiered.selection, selection)
-        _compare_alternatives(tiered.selection, committed.sample or sample, committed, selection, rng,
-                              {t.name: (t, t.sample or sample) for t in tiers})
+        contexts = {t.name: (t, t.sample or sample) for t in tiers}
+        _shrink(tiered.selection, committed.sample or sample, committed, selection, rng, contexts)
+        _compare_alternatives(tiered.selection, committed.sample or sample, committed, selection, rng, contexts)
         return SelectionOutcome(tiered.selection, committed, tiered.committed_tier,
                                 [a.to_record() for a in tiered.attempted_tiers])
 
@@ -72,6 +74,7 @@ def run_selection_stage(
     result = greedy_forward_selection(tier.sample or sample, tier, selection.resolved_n_permutations, selection.alpha,
                                       rng=rng, min_samples_per_dimension=selection.min_samples_per_dimension)
     _assign_outcomes(result, selection)
+    _shrink(result, tier.sample or sample, tier, selection, rng)
     _compare_alternatives(result, tier.sample or sample, tier, selection, rng)
     return SelectionOutcome(result, tier)
 
@@ -84,6 +87,20 @@ def _assign_outcomes(result: SelectionResult | None, selection: SelectionConfig)
         step.outcome = step_outcome(step, selection.alpha)
 
 
+def _shrink(result: SelectionResult | None, sample: SelectionSample, tier: Tier, selection: SelectionConfig,
+            rng: np.random.Generator, tiers: dict | None = None) -> None:
+    """The backward pass (selection.backward), from an independent random
+    stream so that later steps' draws are unchanged. Without it, the final
+    set is the forward selection."""
+    if result is None:
+        return
+    if selection.backward_pass and not result.tier_rejected and not result.ill_posed:
+        backward_pass(result, sample, tier, selection.resolved_n_permutations, selection.alpha, rng.spawn(1)[0],
+                      tiers)
+    else:
+        result.forward_selected = [st.formulation for st in result.trajectory if st.accepted]
+
+
 def _compare_alternatives(result: SelectionResult, sample: SelectionSample, tier: Tier, selection: SelectionConfig,
                           rng: np.random.Generator, tiers: dict | None = None) -> None:
     """The comparisons of each selected formulation with the other candidates,
@@ -92,7 +109,7 @@ def _compare_alternatives(result: SelectionResult, sample: SelectionSample, tier
     steps' draws are unchanged. In cascade mode, tiers holds every tier with
     its sample, and each formulation is compared with the tier that accepted
     it."""
-    if selection.equivalence_checks and any(st.accepted for st in result.trajectory):
+    if selection.equivalence_checks and result.selected:
         stream = rng.spawn(1)[0]
         result.equivalence = information_equivalence(result, sample, tier, selection.resolved_n_permutations,
                                                      selection.alpha, stream, tiers)

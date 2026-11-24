@@ -278,12 +278,10 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         (it accepted too many surrogate candidates), so an acceptance or an
         escalation to that tier was withheld (docs/methods.md, Free-form
         tier).
-    selected_encompassed : a candidate encompasses a selected formulation:
-        given the formulations selected before it, the candidate adds
-        information beyond the selected formulation and the selected
-        formulation adds no contribution of practical size beyond the
-        candidate, either not significant or below the acceptance floor
-        (docs/methods.md, Interchangeable formulations).
+    backward_not_tested : the backward pass could not test a selected
+        formulation (too few clusters of events, or a validity departure with
+        no more general tier), so it was kept without a test
+        (docs/methods.md, Backward pass).
     escalation_unsupported : an escalation leads to the CMI tier, which is
         not calibrated on its sample, so it was not run: after a power-only
         escalation the current tier's selection stands, possibly incomplete;
@@ -323,23 +321,11 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
                     f"set (binomial p={cal['p_value']:.3g}), so it is not calibrated on this sample; selection "
                     "ended with the formulations it had already accepted.")})
     if sel is not None:
-        for rec in sel.equivalence:
-            for cmp in rec["comparisons"]:
-                if (cmp["relation"] == "encompasses_selected"
-                        and cmp["candidate_adds_beyond_selected"]["p_value"] < rec["flag_level"]):
-                    fwd, rev = cmp["candidate_adds_beyond_selected"], cmp["selected_adds_beyond_candidate"]
-                    alpha, floor = rec.get("alpha", 0.05), rec.get("effect_size_floor")
-                    if rev["p_value"] >= alpha or floor is None:
-                        why = f"not significant (p={rev['p_value']:.3g})"
-                    else:
-                        why = (f"significant (p={rev['p_value']:.3g}), but its estimated size "
-                               f"({rev.get('effect', float('nan')):.3g}) is below the acceptance floor ({floor:.3g})")
-                    flags.append({"code": "selected_encompassed", "message": (
-                        f"round {rec['round']}: '{cmp['candidate']}' adds information beyond the selected "
-                        f"'{rec['selected']}' (p={fwd['p_value']:.3g}, effect {fwd.get('effect', float('nan')):.3g}; significant at "
-                        f"{rec['flag_level']:.3g}, Bonferroni across the round's comparisons), and "
-                        f"'{rec['selected']}' adds no contribution of practical size beyond it: {why}. The candidate "
-                        "may be the better choice at that round.")})
+        for rec in sel.backward:
+            if rec.get("not_tested_reason"):
+                flags.append({"code": "backward_not_tested", "message": (
+                    f"the backward pass could not test '{rec['formulation']}' given "
+                    f"{{{', '.join(rec['given'])}}} ({rec['not_tested_reason']}); it was kept without a test.")})
     attempts = getattr(result, "attempted_tiers", None) or []
     provisional = "; ".join(f"{a['tier']} tier: {a['provisional_selection']}" for a in attempts
                             if a.get("provisional_selection")) or "none"
@@ -429,12 +415,15 @@ def _review_header(result) -> dict:
 
 
 def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> dict:
-    keys = ("selected", "trajectory", "unconditional_association", "unconditional_effect", "stopped_reason", "ill_posed",
-            "ill_posed_reason", "untestable", "equivalence", "equivalent_sets", "equivalent_sets_summary", "classes")
+    keys = ("selected", "forward_selected", "backward", "trajectory", "unconditional_association",
+            "unconditional_effect", "stopped_reason", "ill_posed", "ill_posed_reason", "untestable", "equivalence",
+            "equivalent_sets", "equivalent_sets_summary", "classes")
     if sel is None:
         return {k: None for k in keys}
     return {
         "selected": sel.selected,
+        "forward_selected": sel.forward_selected,
+        "backward": sel.backward,
         "trajectory": [
             {
                 "formulation": st.formulation,
@@ -602,7 +591,7 @@ def _pathway_outcome(label: str, result) -> str:
     if sel is None:
         reason = getattr(result, "not_run_reason", None) if result is not None else None
         return f"{label}: not run" + (f" ({reason})" if reason else "")
-    selected = [st.formulation for st in sel.trajectory if st.accepted]
+    selected = list(sel.selected)
     if not selected:
         return f"{label}: nothing selected"
     text = f"{label} {{{', '.join(selected)}}}"
@@ -642,9 +631,9 @@ def outcome_line(pooled: "PooledResult | None" = None, high_flow: "HighFlowResul
     if len(runs) > 1:
         union = []
         for _, res in runs:
-            for st in (res.selection.trajectory if res.selection is not None else []):
-                if st.accepted and st.formulation not in union:
-                    union.append(st.formulation)
+            for name in (res.selection.selected if res.selection is not None else []):
+                if name not in union:
+                    union.append(name)
         together = "both pathways" if len(runs) == 2 else "all runs"
         line += f" | {together}: {{{', '.join(union)}}}"
     return line

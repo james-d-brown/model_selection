@@ -25,14 +25,14 @@ def test_two_copies_of_the_same_information_are_not_distinguished():
     a = signal + 0.01 * rng.normal(size=n)
     b = signal + 0.01 * rng.normal(size=n)
     result, records = _run({"a": a, "b": b, "noise": rng.normal(size=n)}, obs)
-    (first,) = [r for r in records if r["round"] == 1]
+    first = records[0]
     relations = {c["candidate"]: c["relation"] for c in first["comparisons"]}
     other = "b" if first["selected"] == "a" else "a"
     assert relations[other] == "not_distinguished"
     assert relations["noise"] == "encompassed_by_selected"
 
 
-def test_a_noisier_copy_is_encompassed_and_a_distinct_signal_is_distinct():
+def test_a_noisier_copy_is_encompassed_and_a_selected_signal_is_not_compared():
     rng = np.random.default_rng(2)
     n = 600
     s1, s2 = rng.normal(size=n), rng.normal(size=n)
@@ -41,11 +41,11 @@ def test_a_noisier_copy_is_encompassed_and_a_distinct_signal_is_distinct():
     noisy = s1 + 1.0 * rng.normal(size=n)
     other = s2 + 0.05 * rng.normal(size=n)
     result, records = _run({"good": good, "noisy": noisy, "other": other}, obs)
-    first = records[0]
-    assert first["selected"] == "good"
+    assert sorted(result.selected) == ["good", "other"]
+    first = next(r for r in records if r["selected"] == "good")
+    assert first["given"] == ["other"]                       # compared given the other selected formulations
     relations = {c["candidate"]: c["relation"] for c in first["comparisons"]}
-    assert relations["noisy"] == "encompassed_by_selected"
-    assert relations["other"] == "distinct"
+    assert relations == {"noisy": "encompassed_by_selected"}  # only formulations not selected are compared
 
 
 @pytest.mark.integration
@@ -93,10 +93,9 @@ def _step(name, accepted, p=0.001, **kw):
                          n_candidates_tested=3, dependence_lag=0, **kw)
 
 
-def _cmp(candidate, forward_adds, reverse_adds, relation, p=0.001):
-    return {"candidate": candidate, "relation": relation,
-            "candidate_adds_beyond_selected": {"p_value": p, "effect": 0.1, "adds": forward_adds,
-                                               "untestable": False},
+def _cmp(candidate, reverse_adds, p=0.001):
+    return {"candidate": candidate,
+            "relation": "encompassed_by_selected" if reverse_adds else "not_distinguished",
             "selected_adds_beyond_candidate": {"p_value": p, "effect": 0.1, "adds": reverse_adds,
                                                "untestable": False}}
 
@@ -108,9 +107,7 @@ def test_classes_follow_the_comparisons_sets_and_how_selection_ended():
     formulations, Classes)."""
     from model_selection.selection.equivalence import formulation_classes, summarize_sets
     from model_selection.selection.greedy import SelectionResult
-    records = [{"round": 1, "selected": "a", "flag_level": 0.0125,
-                "comparisons": [_cmp("b", False, True, "encompassed_by_selected"),
-                                _cmp("c", False, True, "encompassed_by_selected")]}]
+    records = [{"selected": "a", "given": [], "comparisons": [_cmp("b", True), _cmp("c", True)]}]
     sets = [{"set": ["a"], "selected": True, "supported": True, "selected_adds_beyond_set": None, "members": {}}]
     stopped = SelectionResult(selected=["a"], trajectory=[_step("a", True), _step("b", False, p=0.4)])
     classes = formulation_classes(stopped, records, sets, ["a", "b", "c"])
@@ -127,16 +124,18 @@ def test_classes_follow_the_comparisons_sets_and_how_selection_ended():
     assert formulation_classes(untestable, records, sets, ["a", "b", "c"])["not_tested"] == ["b", "c"]
 
 
-def test_a_selected_formulation_a_candidate_encompasses_is_not_shown_to_be_distinct():
+def test_a_selected_formulation_not_distinguished_from_a_candidate_is_not_shown_to_be_distinct():
+    """Not distinguished from a candidate, but the set with the candidate in
+    its place is not supported: neither distinct nor exchangeable."""
     from model_selection.selection.equivalence import formulation_classes, summarize_sets
     from model_selection.selection.greedy import SelectionResult
-    records = [{"round": 1, "selected": "a", "flag_level": 0.025,
-                "comparisons": [_cmp("b", True, False, "encompasses_selected")]}]
-    sets = [{"set": ["a"], "selected": True, "supported": True, "selected_adds_beyond_set": None, "members": {}}]
+    records = [{"selected": "a", "given": [], "comparisons": [_cmp("b", False, p=0.3)]}]
+    sets = [{"set": ["a"], "selected": True, "supported": True, "selected_adds_beyond_set": None, "members": {}},
+            {"set": ["b"], "selected": False, "supported": False, "selected_adds_beyond_set": None, "members": {}}]
     sel = SelectionResult(selected=["a"], trajectory=[_step("a", True), _step("b", False, p=0.3)])
     classes = formulation_classes(sel, records, sets, ["a", "b"])
     assert classes["not_shown_distinct"] == {"a": ["b"]} and not classes["distinct"]
-    assert "possibly the better choice" in summarize_sets(sel, records, sets, classes)
+    assert "Not shown to be distinct: a adds no information beyond b." in summarize_sets(sel, records, sets, classes)
 
 
 def test_after_an_escalation_each_formulation_is_compared_with_the_tier_that_accepted_it():
@@ -212,7 +211,6 @@ def test_a_comparison_on_too_few_clusters_is_untestable_and_never_adds():
     pos, lag = cluster_coordinates(labels)
     obs = rng.normal(size=labels.size)
     tier = build_tier("linear", SelectionConfig())
-    fwd = _adds(tier, "a", obs + 0.1 * rng.normal(size=obs.size), obs, None, 99, rng, pos, lag, None, 0.05)
-    rev = _adds(tier, "b", rng.normal(size=obs.size), obs, None, 99, rng, pos, lag, None, 0.05)
-    assert fwd["untestable"] and not fwd["adds"]
-    assert _relation(fwd, rev) == "not_distinguished"
+    rev = _adds(tier, "a", obs + 0.1 * rng.normal(size=obs.size), obs, None, 99, rng, pos, lag, None, 0.05)
+    assert rev["untestable"] and not rev["adds"]
+    assert _relation(rev) == "not_distinguished"

@@ -143,13 +143,11 @@ def test_comparisons_with_other_candidates_condition_on_uncensored_values(monkey
     monkeypatch.setattr(eq, "_adds", fake_adds)
     eq.information_equivalence(selection, s, tier, 99, 0.05, np.random.default_rng(5))
     for name, values, z in calls:
+        assert name == "a"                                                # only "a beyond c" is tested
         assert np.array_equal(values, s.candidates[name])                 # tested censored
-        other = "a" if name != "a" else None
-        if other:                                                         # "c beyond a": a conditions uncensored
-            assert np.array_equal(z, np.column_stack([s.covariates, s.conditioning["a"]]))
-        else:                                                             # "a beyond c": c conditions uncensored
-            assert any(np.array_equal(z, np.column_stack([s.covariates, s.conditioning[c]])) for c in ("b", "c"))
-    assert len(calls) == 4                                                # two comparisons, both directions
+        # c conditions uncensored, with the covariates
+        assert any(np.array_equal(z, np.column_stack([s.covariates, s.conditioning[c]])) for c in ("b", "c"))
+    assert len(calls) == 2                                                # two comparisons, one direction
 
 
 def test_calibration_surrogates_are_built_uncensored_and_censored_at_the_candidates_threshold():

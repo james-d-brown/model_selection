@@ -1,53 +1,54 @@
 """
-The comparisons of each selected formulation with the other candidates, the
-sets of formulations the data support equally, and the class of every
-formulation after selection.
+The comparisons of each selected formulation with the formulations not
+selected, the sets of formulations the data support equally, and the class
+of every formulation after selection.
 
 Greedy forward selection tests whether each round's winner is informative
 about the observations given the formulations already selected, not whether
 it is better than the other candidates. When two candidates carry the same
-information, the winner can be decided by noise, and the other then adds
-nothing in the next round only because the winner already carries what it
-has. The selected set is then one of several equally valid sets, as with a
-distribution that has several Markov boundaries (Statnikov et al., 2013).
+information, the winner can be decided by noise. The selected set is then
+one of several equally valid sets, as with a distribution that has several
+Markov boundaries (Statnikov et al., 2013).
 
-For each accepted round, with Z the conditioning set before the winner W,
-every other candidate C not already selected is compared with W in both
-directions, with the test and acceptance gates of the tier that accepted W,
-on that tier's sample, each at level alpha. After a power-only escalation a
-selection combines steps of two tiers, and the tier that accepted W remains
-valid for it:
+The comparisons run on the final set S, after the backward pass
+(selection.backward). Each selected formulation W is compared with every
+formulation C not in S, including those the backward pass removed, given
+the other members R of S, with the test and acceptance gates of W's tier
+(the tier of its backward test), on that tier's sample, at level alpha:
 
-    C adds beyond W:  is C informative about O given Z and W?
-    W adds beyond C:  is W informative about O given Z and C?
+    W adds beyond C:  is W informative about O given R and C?
 
-W adding and C not is encompassing (Mizon and Richard, 1986): W explains
-everything C does and more. C adding and W not means C encompasses W. Both
-adding means each carries information of its own. Neither adding means the
-two are not distinguished: two non-rejections, which are not evidence of no
-contribution.
-
-The comparisons are reported and do not change the selection. The
-selected_encompassed review flag, the one outcome suggesting the selection
-may have picked the wrong formulation, requires its rejection to hold at
-alpha divided by the number of tests in the round (Bonferroni).
+W adding is encompassing (Mizon and Richard, 1986): W explains everything C
+does and more. W not adding means the two are not distinguished. The other
+direction, whether C adds beyond W given R, asks whether C adds given S.
+Forward selection's stopping test answered that for every formulation not
+selected, and the backward pass's removals cannot change the answer: by the
+contraction property of conditional independence (Dawid, 1979; Pearl,
+1988), C adds nothing given the forward selection and the removed
+formulations add nothing given S imply that C adds nothing given S. So it
+is not tested. When selection ended before its stopping test was completed,
+the formulations not selected are reported as not tested.
 
 Equally supported sets. Replacing selected formulations by candidates not
-distinguished from them gives alternative sets of the same size. Each is
-verified as a whole, as alternative Markov boundaries are (Statnikov et al.,
-2013): it is supported if the selected set adds nothing beyond it (the
-selected formulations it lacks, jointly, are not informative given it) and
-every member adds information given the others. A pairwise relation at one
-round is judged given the formulations selected before it, so a combination
-of replacements is only a candidate until it is verified.
+distinguished from them gives alternative sets of the same size. A set is
+supported if the selected formulations it lacks, jointly, add no
+information given it, and every member adds information given the others
+(Statnikov et al., 2013). The selected set itself meets both conditions
+through the backward pass. For a single replacement of W by C, the first
+condition is the comparison of W with C, and C adding given the other
+members R follows by contraction from W adding given R and W adding nothing
+given R and C; each other member is tested, because without the
+intersection property of conditional independence, which fails when
+formulations are functions of one another, its membership is not implied.
+A set with several replacements is verified by every test.
 
 Classes (formulation_classes). Distinct: a selected formulation that adds
-information beyond every candidate compared with it, an intersection-union
-finding at level alpha (Berger, 1982). Exchangeable: a selected formulation
-with the candidates that replace it in a supported set. Redundant: not
-selected and not exchangeable, when the last round tested every formulation
-not selected, given the selected set, and accepted none. Not tested: not
-selected, when selection ended before such a test was completed. A selected
+information beyond every formulation compared with it, an
+intersection-union finding at level alpha (Berger, 1982). Exchangeable: a
+selected formulation with the candidates that replace it in a supported set.
+Redundant: not selected and not exchangeable, when the stopping round tested
+every formulation not selected and accepted none. Not tested: not selected,
+when selection ended before such a test was completed. A selected
 formulation that is neither distinct nor exchangeable is not shown to be
 distinct. Distinct rests on rejections; exchangeable and redundant rest on
 non-rejections, whose chance of missing a real difference is not
@@ -58,10 +59,11 @@ provides them (Besag and Clifford, 1991): draws stop once the candidate can
 no longer be significant at alpha, which gives the same decision as drawing
 them all.
 
-Limitations: the winner was chosen for its large statistic, which biases
-the test of W beyond C towards finding that W adds (post-selection
-inference; Berk et al., 2013); and the tier's adequacy checks were made for
-the selection's conditioning sets, not for the sets with C in place of W.
+Limitations: the selected formulation was chosen for its large statistic,
+which biases the test of W beyond C towards finding that W adds
+(post-selection inference; Berk et al., 2013); and the tier's adequacy
+checks were made for the selection's conditioning sets, not for the sets
+with C in place of W.
 
 See docs/methods.md, Interchangeable formulations.
 """
@@ -80,14 +82,11 @@ from model_selection.utils import as2d
 
 logger = logging.getLogger(__name__)
 
-def _relation(forward: dict, reverse: dict) -> str:
-    if forward["adds"] and reverse["adds"]:
-        return "distinct"
-    if forward["adds"]:
-        return "encompasses_selected"
-    if reverse["adds"]:
-        return "encompassed_by_selected"
-    return "not_distinguished"
+
+def _relation(reverse: dict) -> str:
+    """The relation of a selected formulation W to a formulation C not
+    selected, from the test of W given the other selected formulations and C."""
+    return "encompassed_by_selected" if reverse["adds"] else "not_distinguished"
 
 
 def _adds(tier: Tier, name: str, values, obs, z, n_permutations, rng, time_positions, lag, grid_step,
@@ -155,6 +154,17 @@ def _contexts(sample: SelectionSample, tier: Tier, tiers: TierContexts | None):
     return (lambda name: built.get(name, default)), (lambda name: order.get(name, -1))
 
 
+def _final_tiers(selection: SelectionResult) -> dict[str, str | None]:
+    """The tier of each selected formulation's last test: its backward test
+    when there was one (a validity departure can move it to a more general
+    tier), otherwise the tier that accepted it."""
+    tier_of = {st.formulation: st.tier for st in selection.trajectory if st.accepted}
+    for rec in selection.backward:
+        if rec.get("tier"):
+            tier_of[rec["formulation"]] = rec["tier"]
+    return tier_of
+
+
 def information_equivalence(
         selection: SelectionResult,
         sample: SelectionSample,
@@ -164,48 +174,39 @@ def information_equivalence(
         rng: np.random.Generator,
         tiers: TierContexts | None = None,
 ) -> list[dict]:
-    """For every accepted round, the relation of its winner to each other
-    candidate not selected before it (see the module docstring). Returns one
-    record per accepted round: {"round", "selected", "comparisons": [{
-    "candidate", "relation", "candidate_adds_beyond_selected": {p_value,
-    effect, adds, untestable}, "selected_adds_beyond_candidate": {...}}],
-    "flag_level"}. tiers: every tier of a cascade with its sample; each round
-    is then compared with the tier that accepted it, otherwise with `tier`
-    on `sample`."""
+    """For every formulation W of the final set (selection.selected), its
+    relation to each formulation not in that set (see the module docstring).
+    Returns one record per selected formulation: {"selected", "given", "tier",
+    "alpha", "effect_size_floor", "comparisons": [{"candidate", "relation",
+    "selected_adds_beyond_candidate": {p_value, effect, adds, untestable}}]}.
+    tiers: every tier of a cascade with its sample; W is then compared with
+    the tier of its last test, otherwise with `tier` on `sample`."""
     context_of, _ = _contexts(sample, tier, tiers)
+    final = list(selection.selected)
+    tier_of = _final_tiers(selection)
     records = []
-    for i, step in enumerate(selection.trajectory):
-        if not step.accepted:
-            continue
-        ctx = context_of(step.tier)
+    for w, stream in zip(final, rng.spawn(len(final))):
+        ctx = context_of(tier_of.get(w))
         candidates = ctx.candidates
-        before = selection.selected[:i]
-        winner = step.formulation
-        others = [c for c in candidates if c != winner and c not in before]
+        rest = [m for m in final if m != w]
+        others = [c for c in candidates if c not in final]
         if not others:
             continue
-        z = ctx.z(before)
-        z_with_winner = ctx.z(before + [winner])
-        # The round's comparisons are independent: they run in parallel, each with its own random stream,
-        # split from the run's in a fixed order, so results do not depend on the number of workers (apart from rounding).
-        def compare(job):
-            c, stream = job
-            forward = ctx.adds(c, candidates[c], z_with_winner, n_permutations, stream, alpha)
+        z_rest = ctx.z(rest)
+
+        # The comparisons are independent: they run in parallel, each with its own random stream, split from the
+        # run's in a fixed order, so results do not depend on the number of workers (apart from rounding).
+        def compare(job, ctx=ctx, w=w, z_rest=z_rest):
+            c, sub = job
             c_conditioning = as2d(ctx.sample.conditioning_series[c])
-            z_with_c = c_conditioning if z is None else np.hstack([z, c_conditioning])
-            reverse = ctx.adds(winner, candidates[winner], z_with_c, n_permutations, stream, alpha)
-            return {
-                "candidate": c,
-                "relation": _relation(forward, reverse),
-                "candidate_adds_beyond_selected": forward,
-                "selected_adds_beyond_candidate": reverse,
-            }
-        comparisons = parallel_map(compare, list(zip(others, rng.spawn(len(others)))))
-        records.append({"round": i + 1, "selected": winner, "given": before,
-                        "tier": ctx.tier.name, "alpha": alpha, "effect_size_floor": ctx.tier.effect_size_floor,
-                        "flag_level": alpha / (2 * len(comparisons)), "comparisons": comparisons})
+            z_with_c = c_conditioning if z_rest is None else np.hstack([z_rest, c_conditioning])
+            reverse = ctx.adds(w, ctx.candidates[w], z_with_c, n_permutations, sub, alpha)
+            return {"candidate": c, "relation": _relation(reverse), "selected_adds_beyond_candidate": reverse}
+        comparisons = parallel_map(compare, list(zip(others, stream.spawn(len(others)))))
+        records.append({"selected": w, "given": rest, "tier": ctx.tier.name, "alpha": alpha,
+                        "effect_size_floor": ctx.tier.effect_size_floor, "comparisons": comparisons})
         summary = "; ".join(f"{cmp['candidate']}: {cmp['relation'].replace('_', ' ')}" for cmp in comparisons)
-        logger.info(f"[i] Round {i + 1}, {winner} compared with the other candidates: {summary}.")
+        logger.info(f"[i] {w} compared with the formulations not selected: {summary}.")
     return records
 
 
@@ -225,23 +226,26 @@ def equally_supported_sets(
 ) -> list[dict]:
     """The selected set and every set obtained by replacing selected
     formulations with candidates not distinguished from them, each verified
-    as a whole (see the module docstring). Returns [{"set", "selected",
-    "supported", "selected_adds_beyond_set": {p_value, effect, adds,
-    untestable} or None, "members": {name: {...}}}], the selected set first.
-    With tiers (see information_equivalence), each member is tested with the
-    tier that accepted the formulation in its position, and the replaced
-    formulations jointly with the most general of their tiers."""
-    steps = [st for st in selection.trajectory if st.accepted]
-    selected = [st.formulation for st in steps]
+    (see the module docstring). Returns [{"set", "selected", "supported",
+    "selected_adds_beyond_set": {p_value, effect, adds, untestable} or None,
+    "members": {name: {...}}}], the selected set first. A member test or a
+    joint test that follows from other results is recorded as
+    {"implied": True, "adds": ..., "by": reason} and not run. With tiers
+    (see information_equivalence), each member is tested with the tier of
+    the selected formulation in its position, and the replaced formulations
+    jointly with the most general of their tiers."""
+    selected = list(selection.selected)
     if not selected:
         return []
+    tier_of = _final_tiers(selection)
+    by_selected = {rec["selected"]: rec for rec in comparisons}
     options = [[w] for w in selected]
-    for rec in comparisons:
-        i = selected.index(rec["selected"])
-        for c in rec["comparisons"]:
+    for i, w in enumerate(selected):
+        for c in by_selected.get(w, {}).get("comparisons", []):
             if c["relation"] == "not_distinguished":
                 options[i].append(c["candidate"])
     context_of, rank = _contexts(sample, tier, tiers)
+    backward_of = {r["formulation"]: r for r in selection.backward}
     seen, combos = set(), []
     for combo in itertools.product(*options):
         if len(set(combo)) < len(combo) or frozenset(combo) in seen:
@@ -249,22 +253,42 @@ def equally_supported_sets(
         seen.add(frozenset(combo))
         combos.append(list(combo))
 
+    def kept(w: str) -> bool:
+        """W was tested by the backward pass and still adds given the final set's other members."""
+        rec = backward_of.get(w)
+        return rec is not None and rec["adds"] is True
+
     # Each set is verified independently, in parallel, with its own random stream (see information_equivalence).
     def verify(job):
         members, stream = job
         missing_slots = [i for i, w in enumerate(selected) if w not in members]
         missing = [selected[i] for i in missing_slots]
-        beyond = None
-        if missing:
-            general = max((steps[i].tier for i in missing_slots), key=rank)
-            ctx = context_of(general)
-            beyond = ctx.adds("+".join(missing), _stack(ctx.candidates, missing), ctx.z(members), n_permutations,
-                              stream, alpha)
-        member_tests = {}
-        for slot, m in enumerate(members):
-            ctx = context_of(steps[slot].tier)
-            member_tests[m] = ctx.adds(m, ctx.candidates[m], ctx.z([o for o in members if o != m]), n_permutations,
-                                       stream, alpha)
+        beyond, member_tests = None, {}
+        if not missing and all(kept(m) for m in members):
+            member_tests = {m: {"implied": True, "adds": True, "by": "backward pass"} for m in members}
+        elif len(missing) == 1 and kept(missing[0]):
+            j, w = missing_slots[0], missing[0]
+            c = members[j]
+            cmp = next(x for x in by_selected[w]["comparisons"] if x["candidate"] == c)
+            beyond = dict(cmp["selected_adds_beyond_candidate"], by=f"comparison of {w} with {c}")
+            member_tests[c] = {"implied": True, "adds": True,
+                               "by": f"contraction: {w} adds given the others, and nothing given them and {c}"}
+            for slot, m in enumerate(members):
+                if m == c:
+                    continue
+                ctx = context_of(tier_of.get(selected[slot]))
+                member_tests[m] = ctx.adds(m, ctx.candidates[m], ctx.z([o for o in members if o != m]),
+                                           n_permutations, stream, alpha)
+        else:
+            if missing:
+                general = max((tier_of.get(selected[i]) for i in missing_slots), key=rank)
+                ctx = context_of(general)
+                beyond = ctx.adds("+".join(missing), _stack(ctx.candidates, missing), ctx.z(members),
+                                  n_permutations, stream, alpha)
+            for slot, m in enumerate(members):
+                ctx = context_of(tier_of.get(selected[slot]))
+                member_tests[m] = ctx.adds(m, ctx.candidates[m], ctx.z([o for o in members if o != m]),
+                                           n_permutations, stream, alpha)
         supported = (beyond is None or not beyond["adds"]) and all(t["adds"] for t in member_tests.values())
         return {"set": members, "selected": not missing, "supported": bool(supported),
                 "selected_adds_beyond_set": beyond, "members": member_tests}
@@ -296,17 +320,22 @@ def formulation_classes(selection: SelectionResult, comparisons: list[dict], set
     formulations, Classes):
 
     distinct: selected formulations that add information beyond every
-        candidate compared with them;
+        formulation compared with them;
     exchangeable: {selected formulation: candidates that replace it in a
         supported set};
     not_shown_distinct: {selected formulation: candidates it adds no
         information beyond}, for a selected formulation neither distinct nor
         exchangeable;
-    redundant: formulations neither selected nor exchangeable, when the last
-        round tested every formulation not selected and accepted none;
+    redundant: formulations neither selected nor exchangeable, when the
+        stopping round tested every formulation not selected and accepted
+        none;
     not_tested: those formulations otherwise, with not_tested_reason.
+
+    Selected means the final set, after the backward pass; a formulation the
+    backward pass removed is classed like any other formulation not
+    selected.
     """
-    selected = [st.formulation for st in selection.trajectory if st.accepted]
+    selected = list(selection.selected)
     exchangeable: dict[str, list[str]] = {}
     for s in sets:
         if s["supported"] and not s["selected"]:
@@ -336,15 +365,19 @@ def formulation_classes(selection: SelectionResult, comparisons: list[dict], set
 def summarize_sets(selection: SelectionResult, comparisons: list[dict], sets: list[dict],
                    classes: dict | None = None) -> str:
     """A short statement of the outcome (docs/methods.md, Appendix B,
-    Reporting of interchangeable formulations): the selected set; the class
-    of each formulation, with each exchangeable formulation's candidates; the
-    other sets the data support equally; and, for review, a candidate that
-    encompasses a selected formulation."""
-    selected = [st.formulation for st in selection.trajectory if st.accepted]
+    Reporting of interchangeable formulations): the selected set; the
+    formulations the backward pass removed; the class of each formulation,
+    with each exchangeable formulation's candidates; and the other sets the
+    data support equally."""
+    selected = list(selection.selected)
     if not selected:
         return ""
     fmt = lambda members: "{" + ", ".join(members) + "}"
     parts = [f"Selected {fmt(selected)}."]
+    removed = [r for r in selection.backward if r["removed"]]
+    if removed:
+        parts.append("Removed by the backward pass: " + "; ".join(
+            f"{r['formulation']} adds no information given {fmt(r['given'])}" for r in removed) + ".")
     if classes is not None:
         if classes["exchangeable"]:
             parts.append("Exchangeable: " + "; ".join(
@@ -360,15 +393,6 @@ def summarize_sets(selection: SelectionResult, comparisons: list[dict], sets: li
                 parts.append(f"Distinct: {w}.")
         for w, cs in classes["not_shown_distinct"].items():
             parts.append(f"Not shown to be distinct: {w} adds no information beyond {', '.join(cs)}.")
-    for rec in comparisons:
-        better = [c["candidate"] for c in rec["comparisons"] if c["relation"] == "encompasses_selected"]
-        if better:
-            parts.append(f"{', '.join(better)} adds information beyond {rec['selected']}, which adds none beyond it: "
-                         "possibly the better choice.")
-    chosen = next((s for s in sets if s["selected"]), None)
-    if chosen is not None and not chosen["supported"]:
-        weak = [m for m, t in chosen["members"].items() if not t["adds"]]
-        parts.append(f"Given the other selected formulations, {', '.join(weak)} no longer adds detectably.")
     alternatives = [s for s in sets if s["supported"] and not s["selected"]]
     if alternatives:
         parts.append("Equally supported sets: " + ", ".join(fmt(s["set"]) for s in alternatives) + ".")
