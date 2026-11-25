@@ -22,7 +22,7 @@ def _stage(candidates, obs, seed=1, measure="linear"):
 
 
 def test_a_composite_selected_first_is_removed_given_its_parts():
-    """The colleague's case: 5 = 1 + 2 + noise is selected first, then 1 and 2;
+    """A composite selected first: 5 = 1 + 2 + noise is selected first, then 1 and 2;
     given 1 and 2, 5 adds nothing, and the backward pass removes it. It is
     then compared like any formulation not selected."""
     rng = np.random.default_rng(0)

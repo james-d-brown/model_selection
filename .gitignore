@@ -11,5 +11,12 @@ evaluate.py
 README.html
 docs/methods.html
 
-# Diagnostic scripts (kept locally, not committed)
-scripts/diagnostics/
+# Diagnostic scripts (kept locally, not committed), except the known-answer check.
+# The folder's contents are ignored, not the folder, so that files in it can be re-included.
+scripts/diagnostics/*
+!scripts/diagnostics/__init__.py
+!scripts/diagnostics/known_answer_check.py
+!scripts/diagnostics/README.md
+
+# The test of the local event-merging diagnostic, kept locally with it
+tests/scripts/test_event_merging.py
