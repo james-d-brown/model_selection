@@ -35,6 +35,13 @@ Cases (--case):
               (0.15); 7 is an independent flow series. Minimal set {1, 2, 3},
               with 6 in place of 2 equally correct, in both pathways.
 
+  many_linear  the roles of "many", additive on the square-root scale on
+              which the pathway analyses every series (every flow is the square
+              of its square-root-scale value), so the linear tier holds by
+              construction; components as in many_censored; noise sd 0.5 on
+              the square-root scale for the noisy formulations and the
+              observations. Minimal set {1, 2, 3}, with 6 in place of 2.
+
 With --censored, the censored pooled pathway runs instead: the candidates
 and the observations are censored at their own --quantile (default 0.9),
 the selected formulations enter the conditioning set uncensored
@@ -59,11 +66,20 @@ replicate also runs under Python's profiler: its statistics are written to
 known_answer_<case>_seed<seed>.prof and the functions with the most
 cumulative time are printed.
 
+Plots show a case's construction, not a run: one realization (seed
+PLOT_SEED), and nothing else is done. --plot writes an interactive page of
+the observations, the components and every formulation, coloured by role
+(known_answer_<case>.html); --plot-static writes one calendar year
+(PLOT_YEAR) of the observations and the components as a figure
+(known_answer_<case>.svg; needs matplotlib), as in docs/methods.md,
+Appendix G. With --censored, both show each series' censoring level at
+--quantile.
+
 Usage, from the project root:
     python -m scripts.diagnostics.known_answer_check --case simple --reps 6 --workers 6
     python -m scripts.diagnostics.known_answer_check --case many --reps 6 --workers 6
     python -m scripts.diagnostics.known_answer_check --case many --reps 3 --workers 3 --censored [--quantile 0.9]
-    python -m scripts.diagnostics.known_answer_check --case many --reps 1 --plot-only    (the series, no run)
+    python -m scripts.diagnostics.known_answer_check --case many_censored --plot-static --censored   (no run)
     [--years 20] [--measure cascade] [--n-perm 499] [--profile] [--quiet]
 Each worker is single-threaded; one Ctrl+C stops it and reports the
 replicates already finished.
@@ -90,6 +106,10 @@ CASES = {
                                   {"1_baseflow", "6_quickflow_copy", "3_interflow"}],
                       "uninformative": {"7_unrelated_flow"},
                       "redundant": {"4_base_quick_mult", "5_quick_inter_mult", "8_all_mult"}},
+    "many_linear": {"minimal": [{"1_baseflow", "2_quickflow", "3_interflow"},
+                                {"1_baseflow", "6_quickflow_copy", "3_interflow"}],
+                    "uninformative": {"7_unrelated_flow"},
+                    "redundant": {"4_base_quick_noise", "5_quick_inter_noise", "8_all_noise"}},
 }
 
 
@@ -146,11 +166,47 @@ def _wet_season_parts(seed: int, years: int, relative_error: float = 0.3, obs_er
             "obs": pd.Series(np.clip(obs, 0.1, None), index=idx), "formulations": forms}
 
 
+def _square_root_scale_parts(seed: int, years: int, noise_sd: float = 0.5, obs_sd: float = 0.5) -> dict:
+    """The "many_linear" case: the roles of "many", additive on the square-root
+    scale on which the pathway analyses every series, so that the
+    observations' conditional mean is linear in the formulations there and
+    the linear tier holds by construction.
+
+    The components are the square roots of the "many_censored" components
+    (a wet season raising storms, interflow and baseflow together). On the
+    square-root scale the observations are their sum plus the seasonal cycle
+    plus noise (sd obs_sd), and each noisy formulation is its components'
+    sum plus noise (sd noise_sd); every flow is the square of its
+    square-root-scale value. The near-copy carries noise of 0.01 noise_sd,
+    and the uninformative formulation is an independent flow series. Flows
+    are kept at least 0.0025 (a square-root-scale floor of 0.05), which the
+    noisy composites reach on about 1.5% of days."""
+    parts = _wet_season_parts(seed, years)
+    rng = np.random.default_rng(seed + 10_000)
+    idx = parts["index"]
+    n = len(idx)
+    c = {k: np.sqrt(v) for k, v in parts["components"].items()}
+    noise = lambda sd: rng.normal(scale=sd, size=n)
+    flow = lambda r: pd.Series(np.square(np.clip(r, 0.05, None)), index=idx)
+    obs_root = c["seasonal cycle"] + c["baseflow"] + c["quickflow"] + c["interflow"] + noise(obs_sd)
+    other = parts["formulations"]["7_unrelated_flow"]
+    forms = {"1_baseflow": flow(c["baseflow"]), "2_quickflow": flow(c["quickflow"]),
+             "3_interflow": flow(c["interflow"]),
+             "4_base_quick_noise": flow(c["baseflow"] + c["quickflow"] + noise(noise_sd)),
+             "5_quick_inter_noise": flow(c["quickflow"] + c["interflow"] + noise(noise_sd)),
+             "6_quickflow_copy": flow(c["quickflow"] + noise(0.01 * noise_sd)), "7_unrelated_flow": other,
+             "8_all_noise": flow(c["baseflow"] + c["quickflow"] + c["interflow"] + noise(noise_sd))}
+    return {"index": idx, "components": {k: np.square(v) for k, v in c.items()}, "obs": flow(obs_root),
+            "formulations": forms}
+
+
 def basin_parts(case: str, seed: int, years: int, noise_sd: float = 2.0) -> dict:
     """The case's components, observations and formulations (make_basin's
     construction), for plotting: {"index", "components", "obs", "formulations"}."""
     if case == "many_censored":
         return _wet_season_parts(seed, years)
+    if case == "many_linear":
+        return _square_root_scale_parts(seed, years)
     rng = np.random.default_rng(seed)
     n = int(years * 365.25)
     idx = pd.date_range("2000-01-01", periods=n, freq="D")
@@ -196,7 +252,15 @@ ROLES = {
                       "5_quick_inter_mult": "noisy composite (redundant)",
                       "6_quickflow_copy": "near-copy of 2 (exchangeable)", "7_unrelated_flow": "uninformative",
                       "8_all_mult": "noisy composite (redundant)"},
+    "many_linear": {"1_baseflow": "minimal set", "2_quickflow": "minimal set", "3_interflow": "minimal set",
+                    "4_base_quick_noise": "noisy composite (redundant)",
+                    "5_quick_inter_noise": "noisy composite (redundant)",
+                    "6_quickflow_copy": "near-copy of 2 (exchangeable)", "7_unrelated_flow": "uninformative",
+                    "8_all_noise": "noisy composite (redundant)"},
 }
+PLOT_SEED = 1          # the realization the plots show
+PLOT_YEAR = 2008       # the calendar year of --plot-static (the record starts in 2000)
+
 ROLE_COLOURS = {"minimal set": "#1f77b4", "near-copy of 2 (exchangeable)": "#17becf",
                 "noisy composite (redundant)": "#ff7f0e", "noisy copy (redundant)": "#ff7f0e",
                 "uninformative": "#7f7f7f"}
@@ -257,6 +321,44 @@ def plot_case(case: str, seed: int, years: int, path: str, quantile: float | Non
                       margin=dict(t=150), legend=dict(orientation="h", yanchor="bottom", y=1.0 + 45 / (170 * rows),
                                                       x=0))
     write_standalone_html(fig, path, f"Known-answer basin {case}, seed {seed}")
+
+
+def plot_static(case: str, seed: int, years: int, path: str, quantile: float | None = None,
+                year: int = PLOT_YEAR) -> None:
+    """One calendar year of a case as a figure (SVG): the observations, with
+    their censoring level when quantile is given, above the components that
+    generate them."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    parts = basin_parts(case, seed, years)
+    idx, obs = parts["index"], parts["obs"].values
+    m = idx.year == year
+    if not m.any():
+        raise ValueError(f"the record ({idx[0].year}-{idx[-1].year}) does not include {year}")
+    plt.rcParams.update({"font.size": 9, "font.family": "sans-serif", "svg.fonttype": "none"})
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(7.2, 5.0), sharex=True)
+    top.plot(idx[m], obs[m], color="#222222", lw=0.9, label="Observations")
+    if quantile is not None:
+        top.axhline(float(np.quantile(obs, quantile)), color="#b2182b", lw=0.9, ls="--",
+                    label=f"{100 * quantile:g}th percentile of the record")
+    colours = {"baseflow": "#2166ac", "interflow": "#1b7837", "quickflow": "#e08214"}
+    for name, colour in colours.items():
+        if name in parts["components"]:
+            bottom.plot(idx[m], parts["components"][name][m], color=colour, lw=0.9, label=name.capitalize())
+    bottom.plot(idx[m], parts["components"]["seasonal cycle"][m], color="#888888", lw=0.9, ls=":",
+                label="Seasonal cycle")
+    for ax, ncol in ((top, 2), (bottom, 4)):
+        ax.legend(frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=ncol)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_ylabel("Flow")
+    bottom.xaxis.set_major_locator(mdates.MonthLocator())
+    bottom.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def _post_selection_tests(sel) -> dict:
@@ -362,9 +464,11 @@ def main():
     ap.add_argument("--profile", action="store_true", help="run each replicate under Python's profiler")
     ap.add_argument("--quiet", action="store_true", help="do not print each stage as it finishes")
     ap.add_argument("--plot", action="store_true",
-                    help="write each replicate's series (observations, components, formulations) to "
-                         "known_answer_<case>_seed<seed>.html before running")
-    ap.add_argument("--plot-only", action="store_true", help="write the plots and stop")
+                    help="write the case's series (observations, components, formulations) to "
+                         "known_answer_<case>.html, and do not run")
+    ap.add_argument("--plot-static", action="store_true",
+                    help="write one calendar year of the observations and components to "
+                         "known_answer_<case>.svg (needs matplotlib), and do not run")
     ap.add_argument("--censored", action="store_true", help="the censored pooled pathway")
     ap.add_argument("--quantile", type=float, default=0.9,
                     help="with --censored, the quantile at which each series is censored (default 0.9)")
@@ -375,14 +479,14 @@ def main():
     if a.censored and not 0.0 < a.quantile < 1.0:
         ap.error("--quantile must lie in (0, 1)")
     quantile = a.quantile if a.censored else None
-    if a.plot or a.plot_only:
+    if a.plot or a.plot_static:
         tag = f"_censored{a.quantile:g}" if a.censored else ""
-        for s in range(a.first_seed, a.first_seed + a.reps):
-            path = f"known_answer_{a.case}{tag}_seed{s}.html"
-            plot_case(a.case, s, a.years, path, quantile)
-            print(f"  wrote {path}", flush=True)
-        if a.plot_only:
-            return
+        for wanted, draw, ext in ((a.plot, plot_case, "html"), (a.plot_static, plot_static, "svg")):
+            if wanted:
+                path = f"known_answer_{a.case}{tag}.{ext}"
+                draw(a.case, PLOT_SEED, a.years, path, quantile)
+                print(f"  wrote {path}", flush=True)
+        return
     tasks = [(a.case, s, a.years, a.measure, a.n_perm, a.profile, a.quiet, quantile)
              for s in range(a.first_seed, a.first_seed + a.reps)]
     rows, t0 = [], time.time()

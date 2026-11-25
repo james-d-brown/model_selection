@@ -16,22 +16,32 @@ Cases (`--case`):
   the three components, with the near-copy exchangeable.
 - `many_censored`: the same roles, built so that the correct set is the same
   with and without censoring at a high quantile.
+- `many_linear`: the same roles, additive on the square-root scale, so the
+  linear tier holds by construction; run uncensored, with `--measure linear`.
 
 Run it from the project root, for example
 
 ```
 python -m scripts.diagnostics.known_answer_check --case many --reps 3 --workers 3
 python -m scripts.diagnostics.known_answer_check --case many_censored --reps 3 --workers 3 --censored
-python -m scripts.diagnostics.known_answer_check --case many --reps 1 --plot-only
+python -m scripts.diagnostics.known_answer_check --case many_linear --reps 3 --workers 3 --measure linear
+python -m scripts.diagnostics.known_answer_check --case many_censored --plot-static --censored
 ```
 
 Options: `--censored` (with `--quantile`, default 0.9) runs the censored
-pooled pathway; `--plot` and `--plot-only` write each replicate's series to an
-HTML page; `--profile` runs each replicate under Python's profiler;
+pooled pathway; `--profile` runs each replicate under Python's profiler;
 `--quiet` turns off the stage-by-stage progress; `--years`, `--measure`,
 `--n-perm`, `--first-seed` and `--workers` set the record length, the tier
 or cascade, the number of resamples, the seeds and the parallel replicates.
-Each replicate runs single-threaded. The script's docstring describes each
+Each replicate runs single-threaded.
+
+Plots show a case's construction from one fixed realization, and nothing
+is run: `--plot` writes an interactive page of the observations, the
+components and every formulation, and `--plot-static` writes one calendar
+year of the observations and the components as an SVG figure (it needs
+matplotlib). With `--censored`, both show the censoring level.
+
+The script's docstring describes each
 case's construction and what counts as a correct outcome.
 
 The other diagnostic scripts used in developing the methods are kept locally
