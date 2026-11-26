@@ -382,7 +382,7 @@ def _stage_kind(label: str) -> str:
     tier = label.split(" round ")[0] if " round " in label else ""
     for key, kind in (("significance test", "significance tests"), ("effect sizes", "effect sizes"),
                       ("validity test", "validity tests"), ("power tests", "power tests"),
-                      ("calibration", "calibration tests"), ("effective sample size", "effective sample size")):
+                      ("effective sample size", "effective sample size")):
         if key in label:
             return f"{tier}: {kind}" if tier else kind
     return "other"

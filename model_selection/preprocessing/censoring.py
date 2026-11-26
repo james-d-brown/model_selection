@@ -15,9 +15,8 @@ the null hypothesis.
 Censoring : the configuration, one quantile shared with the high-flow
     events (EventConfig.high_flow_quantile).
 CensoredSeries : what a censored sample carries besides the censored
-    values: each series' uncensored values and its threshold, so that
-    surrogate candidates can be built uncensored and then censored at the
-    candidate's own threshold.
+    values: each series' uncensored values and its threshold, so that a
+    subsample of the rows can be censored again, with its records.
 censor_and_record, censoring_record : a censored array is recorded with its
     uncensored values and threshold, so that the nonlinear tier can estimate
     its conditional means by fitting the uncensored values and then applying
@@ -119,8 +118,8 @@ class CensoredSeries:
     obs_uncensored: np.ndarray | None = None
 
     def censor(self, name: str, values: np.ndarray) -> np.ndarray:
-        """`values` (e.g. a surrogate of candidate `name`, uncensored) censored
-        at that candidate's threshold, and recorded (censor_and_record)."""
+        """Uncensored `values` of candidate `name` censored at that
+        candidate's threshold, and recorded (censor_and_record)."""
         return censor_and_record(values, self.thresholds[name])
 
     def censored_candidates(self) -> dict[str, np.ndarray]:

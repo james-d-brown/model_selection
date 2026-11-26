@@ -131,7 +131,7 @@ def test_a_censored_array_carries_its_uncensored_values_and_threshold():
     assert censoring_record(X.copy()) is None and censoring_record(U) is None
 
 
-def test_subsamples_and_surrogates_are_censored_with_records():
+def test_subsamples_and_recensored_values_carry_records():
     rng = np.random.default_rng(4)
     unc = {"a": rng.normal(size=40)}
     obs_unc = rng.normal(size=40)
@@ -143,8 +143,8 @@ def test_subsamples_and_surrogates_are_censored_with_records():
     assert np.allclose(sub.candidates["a"], s.candidates["a"][idx]) and np.allclose(sub.obs, s.obs[idx])
     assert np.allclose(censoring_record(sub.obs)[0], obs_unc[idx])
     assert np.allclose(censoring_record(sub.candidates["a"])[0], unc["a"][idx])
-    surrogate = cs.censor("a", rng.normal(size=40))
-    assert censoring_record(surrogate)[1] == cs.thresholds["a"]
+    recensored = cs.censor("a", rng.normal(size=40))
+    assert censoring_record(recensored)[1] == cs.thresholds["a"]
 
 
 def test_the_nonlinear_tier_fits_then_censors_a_recorded_series():

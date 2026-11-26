@@ -94,25 +94,9 @@ def test_censored_run_reports_its_censoring_and_writes_its_own_result_file(tmp_p
 
 
 @pytest.mark.integration
-def test_censored_cascade_runs_its_subsamples_and_the_cmi_calibration_on_censored_data(monkeypatch):
+def test_censored_cascade_runs_its_subsamples_on_censored_data(monkeypatch):
     """The cascade on a long record: the nonlinear and CMI tiers get their own
-    subsamples, which keep the censoring; the CMI calibration's surrogates
-    have the candidate's point mass."""
-    import model_selection.statistics.conditional_independence.calibration as cal
-    seen = {"surrogate_shares": []}
-    real_cal = cal.cmi_calibration
-
-    def watch(test, candidate, obs, conditioning, *args, censor=None, **kwargs):
-        seen["censor_given"] = censor is not None
-        def censoring_watch(v):
-            out = censor(v)
-            seen["surrogate_shares"].append(float(np.mean(out == out.min())))
-            return out
-        return real_cal(test, candidate, obs, conditioning, *args, censor=censoring_watch if censor else None,
-                        **kwargs)
-
-    import model_selection.selection.tiers as tiers
-    monkeypatch.setattr(tiers, "cmi_calibration", watch)
+    subsamples, which keep the censoring."""
     basin = make_synthetic_basin(seed=4)
     seen_stage = {}
     real = pooled_pathway.run_selection_stage
@@ -130,12 +114,6 @@ def test_censored_cascade_runs_its_subsamples_and_the_cmi_calibration_on_censore
         t = sub.censored.thresholds[name]
         assert np.array_equal(sub.candidates[name], np.maximum(sub.censored.uncensored[name], t))
     assert result.censoring is not None and result.selection is not None
-    # The informative formulation is accepted, so the calibration runs on its 52 censored surrogates.
-    assert any(st.accepted and st.cmi_calibration for st in result.selection.trajectory)
-    assert seen["censor_given"] and len(seen["surrogate_shares"]) == 52
-    # A surrogate is the candidate's fit plus permuted residuals, censored at the candidate's threshold, so its
-    # share at the threshold is near, not exactly, the quantile's 0.9; every one keeps a large point mass.
-    assert min(seen["surrogate_shares"]) > 0.75
 
 
 @pytest.mark.integration

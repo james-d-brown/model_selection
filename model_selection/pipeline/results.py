@@ -38,7 +38,6 @@ class PooledResult:
     seasonal_conditioning: dict | None = None
     seed: int | None = None
     meaningful_r2: float | None = None
-    cmi_calibration: bool = True
     censoring: dict | None = None
     """With censoring at high flow: the quantile, each series' threshold
     (on its transformed scale) and the share of each series at it; None for the
@@ -103,7 +102,6 @@ class HighFlowResult:
     not_run_reason: str | None = None
     adequacy_floor: float | None = None
     seed: int | None = None
-    cmi_calibration: bool = True
     pearson_correlation: dict = field(default_factory=dict)
     """Each formulation's Pearson correlation with the observed flow at the
     time steps inside the high-flow events; reported only, for comparison."""
@@ -270,23 +268,10 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
     formulation_missing_values : a formulation lacks values at timesteps
         where the observations have them, which removes those timesteps from
         the common basis of every series.
-    cmi_calibration_not_checked : the CMI tier made the selection, with a
-        non-empty conditioning set, without its calibration check (turned
-        off in the configuration); rerun with
-        SelectionConfig(cmi_calibration=True) to check it.
-    cmi_not_calibrated : the CMI tier was not calibrated on the sample
-        (it accepted too many surrogate candidates), so an acceptance or an
-        escalation to that tier was withheld (docs/methods.md, Free-form
-        tier).
     backward_not_tested : the backward pass could not test a selected
         formulation (too few clusters of events, or a validity departure with
         no more general tier), so it was kept without a test
         (docs/methods.md, Backward pass).
-    escalation_unsupported : an escalation leads to the CMI tier, which is
-        not calibrated on its sample, so it was not run: after a power-only
-        escalation the current tier's selection stands, possibly incomplete;
-        after a validity escalation no selection is reported
-        (docs/methods.md, Selection).
     event_terms_correlated : in a step on high-flow events in clusters,
         the terms of the statistic were correlated between consecutive
         clusters (docs/methods.md, Dependence between samples).
@@ -305,35 +290,12 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
             "analysis of every series: " + ", ".join(f"{k}={v}" for k, v in removed.items()) + ".")})
     tier = result.committed_tier or result.measure
     sel = result.selection
-    if (sel is not None and tier == "cmi" and not result.cmi_calibration
-            and (isinstance(result, HighFlowResult) or any(st.n_selected_before > 0 for st in sel.trajectory))):
-        flags.append({"code": "cmi_calibration_not_checked", "message": (
-            "the CMI tier made this selection given previously selected formulations without its calibration "
-            "check on surrogate candidates; rerun with SelectionConfig(cmi_calibration=True) to confirm that it "
-            "is calibrated on this sample.")})
-    if sel is not None:
-        for i, step in enumerate(sel.trajectory, start=1):
-            cal = step.cmi_calibration
-            if cal is not None and not cal["calibrated"]:
-                flags.append({"code": "cmi_not_calibrated", "message": (
-                    f"round {i} ({step.formulation}): the CMI tier accepted {cal['false_acceptances']} of "
-                    f"{cal['n_surrogates']} surrogate candidates carrying no information beyond the conditioning "
-                    f"set (binomial p={cal['p_value']:.3g}), so it is not calibrated on this sample; selection "
-                    "ended with the formulations it had already accepted.")})
     if sel is not None:
         for rec in sel.backward:
             if rec.get("not_tested_reason"):
                 flags.append({"code": "backward_not_tested", "message": (
                     f"the backward pass could not test '{rec['formulation']}' given "
                     f"{{{', '.join(rec['given'])}}} ({rec['not_tested_reason']}); it was kept without a test.")})
-    attempts = getattr(result, "attempted_tiers", None) or []
-    provisional = "; ".join(f"{a['tier']} tier: {a['provisional_selection']}" for a in attempts
-                            if a.get("provisional_selection")) or "none"
-    for attempt in attempts:
-        if not attempt.get("run", True):
-            extra = ("" if not attempt.get("committed") else
-                     f" Selections made before the assumptions were rejected, for information only: {provisional}.")
-            flags.append({"code": "escalation_unsupported", "message": f"{attempt['reason']}.{extra}"})
     if sel is not None:
         for i, step in enumerate(sel.trajectory, start=1):
             if step.low_samples_per_dimension:
@@ -366,7 +328,7 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
                         "not because its assumption was shown to hold. On long records the samples are spaced at the "
                         "dependence lag, so a long lag leaves few of them.")})
             flags += _dependence_flags(f"round {i} ({step.formulation})", sources)
-    for attempt in attempts:
+    for attempt in getattr(result, "attempted_tiers", None) or []:
         test = attempt.get("escalation_test")
         if test and test.get("dependence"):
             flags += _dependence_flags(
@@ -441,7 +403,6 @@ def selection_to_records(sel: SelectionResult | None, n_features: int = 1) -> di
                 "diagnostics": st.diagnostics,
                 "adequacy": st.adequacy,
                 "other_candidates_checked": st.other_candidates_checked,
-                "cmi_calibration": st.cmi_calibration,
                 "samples_per_dimension": st.samples_per_dimension,
                 "low_samples_per_dimension": st.low_samples_per_dimension,
                 "effective_sample_size": st.effective_sample_size,
@@ -488,7 +449,6 @@ def pooled_result_to_dict(result: PooledResult) -> dict:
         "attempted_tiers": result.attempted_tiers,
         "adequacy_floor": result.adequacy_floor,
         "seed": result.seed,
-        "cmi_calibration": result.cmi_calibration,
         "meaningful_r2": result.meaningful_r2,
         "seasonal_conditioning": result.seasonal_conditioning,
         "censoring": result.censoring,
@@ -553,7 +513,6 @@ def high_flow_result_to_dict(result: HighFlowResult) -> dict:
         "attempted_tiers": result.attempted_tiers,
         "adequacy_floor": result.adequacy_floor,
         "seed": result.seed,
-        "cmi_calibration": result.cmi_calibration,
         "ill_posed": sel.ill_posed if sel is not None else False,
         "ill_posed_reason": sel.ill_posed_reason if sel is not None else None,
         "notes": result.notes,

@@ -14,14 +14,11 @@ requirement ends the cascade, with no selection in round 1 and the selection
 so far otherwise, because later tiers need more samples, not fewer.
 
 A tier whose validity assumption was rejected is never used for the
-selection. When the tier the escalation leads to is not calibrated on its
-own sample (the CMI tier's guard, at the round that leads there), it is not
-run: after a power-only escalation the current tier's selection stands,
-possibly incomplete; after a validity escalation no selection is reported.
+selection.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -36,9 +33,6 @@ class TierAttempt:
     committed: bool
     reason: str
     diagnostic_plot_paths: list[str] = field(default_factory=list)
-    run: bool = True
-    """False for a tier committed to without running it, because it cannot be
-    used on its sample (module docstring)."""
     provisional_selection: list[str] = field(default_factory=list)
     """Formulations a rejected trial had accepted before its assumptions were
     rejected; for information only, never the result."""
@@ -47,7 +41,7 @@ class TierAttempt:
 
     def to_record(self) -> dict:
         return {"tier": self.tier, "committed": self.committed, "reason": self.reason,
-                "diagnostic_plot_paths": self.diagnostic_plot_paths, "run": self.run,
+                "diagnostic_plot_paths": self.diagnostic_plot_paths,
                 "provisional_selection": self.provisional_selection,
                 "escalation_test": self.escalation_test}
 
@@ -101,24 +95,6 @@ def run_tiered_selection(
         ))
         if not result.tier_rejected:
             return TieredSelectionResult(tier.name, result, attempted)
-        if result.next_tier_unsupported is not None and i + 1 < len(tiers):
-            nxt = tiers[i + 1].name
-            if result.escalation_continues:
-                # A power-only departure: this tier's acceptances remain valid, so its selection stands.
-                reason = (f"not run: a departure in the {tier.name} tier concerns power only, and the {nxt} tier "
-                          f"cannot be used: {result.next_tier_unsupported}; the {tier.name} tier's selection stands, "
-                          "possibly incomplete")
-                attempted[-1].committed = True
-                attempted.append(TierAttempt(tier=nxt, committed=False, reason=reason, run=False))
-                return TieredSelectionResult(tier.name, replace(result, tier_rejected=False,
-                                                                stopped_reason=f"{result.stopped_reason}; {reason}"),
-                                             attempted)
-            # The tier's validity was rejected, and the next tier cannot be used: no tier whose assumptions hold
-            # can make the selection.
-            reason = (f"not run: the {tier.name} tier's assumptions were rejected, and the {nxt} tier cannot be "
-                      f"used: {result.next_tier_unsupported}; no selection can be supported")
-            attempted.append(TierAttempt(tier=nxt, committed=True, reason=reason, run=False))
-            return TieredSelectionResult(nxt, SelectionResult(stopped_reason=reason), attempted)
         carried = [st for st in result.trajectory if st.accepted] if result.escalation_continues else []
     raise RuntimeError(f"Every tier was rejected: {[a.tier for a in attempted]}. The last tier "
                        "must have no adequacy checks.")

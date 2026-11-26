@@ -284,29 +284,6 @@ def test_the_level_divides_alpha_by_every_relationship_test_of_every_candidate()
     assert len(levels) == 4 and all(lv == pytest.approx(0.05 / 6) for lv in levels)
 
 
-def test_an_escalation_to_an_uncalibrated_tier_marks_the_next_tier_unsupported():
-    """When a remaining candidate's departure leads to an uncalibrated
-    free-form tier, the guard is applied to that candidate and the next tier
-    is marked unsupported; the departure concerns power only, so the
-    selection so far is kept."""
-    sample = _sample(names=("a", "b", "c", "d"))
-    guard_seen = []
-
-    def guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
-                  period_starts=None):
-        guard_seen.append(candidate)
-        return _calibration(False, [])(candidate, obs, conditioning, time_positions, dependence_lag, rng)
-
-    tier = _tier({"a": 0.5, "b": 0.01, "c": 0.0, "d": 0.0})
-    tier.adequacy_checks = [_departing_check([sample.candidates["c"]])]
-    tier.escalation_guard = guard
-    res = greedy_forward_selection(sample, tier, 99, rng=np.random.default_rng(10))
-    assert res.tier_rejected and res.escalation_continues and res.selected == ["a"]
-    assert len(guard_seen) == 1 and guard_seen[0] is sample.candidates["c"]
-    assert "rejects for the remaining candidate 'c'" in res.stopped_reason
-    assert res.next_tier_unsupported is not None and "not calibrated" in res.next_tier_unsupported
-
-
 def test_sample_covariates_are_conditioned_on_from_round_one():
     """Observation-free covariates of the sample (the event registration)
     enter the conditioning set in every round, before any formulation is
@@ -317,55 +294,6 @@ def test_sample_covariates_are_conditioned_on_from_round_one():
     greedy_forward_selection(sample, Tier("stub", stub, 0.02), 99, rng=np.random.default_rng(2))
     assert stub.calls[0] == (["a", "b", "c"], (len(sample.obs), 2))
     assert stub.calls[1][1] == (len(sample.obs), 3)
-
-
-def _calibration(calibrated, calls):
-    def calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
-                  period_starts=None):
-        calls.append(1)
-        return {"n_surrogates": 52, "false_acceptances": 1 if calibrated else 20,
-                "false_acceptance_rate": 0.02 if calibrated else 0.38, "p_value": 0.9 if calibrated else 1e-9,
-                "calibrated": calibrated}
-    return calibrate
-
-
-def test_an_acceptance_by_an_uncalibrated_tier_is_withheld_and_ends_selection():
-    calls = []
-    sample = _sample()
-    sample.covariates = np.zeros((len(sample.obs), 1))
-    tier = _tier({"a": 0.5, "b": 0.3, "c": 0.0})
-    tier.calibration = _calibration(False, calls)
-    res = greedy_forward_selection(sample, tier, 99, rng=np.random.default_rng(14))
-    assert res.selected == [] and len(res.trajectory) == 1 and calls == [1]
-    assert not res.trajectory[0].accepted and not res.trajectory[0].cmi_calibration["calibrated"]
-    assert "not calibrated" in res.stopped_reason
-
-
-def test_a_calibrated_tier_keeps_its_acceptances():
-    calls = []
-    sample = _sample()
-    sample.covariates = np.zeros((len(sample.obs), 1))
-    tier = _tier({"a": 0.5, "b": 0.3, "c": 0.0})
-    tier.calibration = _calibration(True, calls)
-    res = greedy_forward_selection(sample, tier, 99, rng=np.random.default_rng(15))
-    assert res.selected == ["a", "b"] and len(calls) == 2
-
-
-def test_escalation_to_an_uncalibrated_cmi_tier_marks_it_unsupported():
-    """When the check that would escalate rejects but the CMI tier is not
-    calibrated at that state, the CMI tier is marked unsupported."""
-    calls, guard_calls = [], []
-    tier = _tier({"a": 0.5, "b": 0.0, "c": 0.0})
-    tier.adequacy_checks = [_relationship_check(False, calls, only_round_one=False)]
-    tier.escalation_guard = _calibration(False, guard_calls)
-    res = greedy_forward_selection(_sample(), tier, 99, rng=np.random.default_rng(16))
-    assert res.tier_rejected and res.escalation_continues and res.selected == ["a"] and guard_calls == [1]
-    assert "not calibrated" in res.next_tier_unsupported and not res.trajectory[-1].cmi_calibration["calibrated"]
-
-
-def test_cmi_calibration_is_attached_only_when_requested():
-    assert build_tier("cmi", SelectionConfig(measure="cmi", cmi_calibration=False)).calibration is None
-    assert callable(build_tier("cmi", SelectionConfig(measure="cmi", cmi_calibration=True)).calibration)
 
 
 class _EffectStub(StubTest):
@@ -417,7 +345,6 @@ def test_removed_covariates_count_as_conditioning_variables():
     (False, 0.01, True, "detected_below_floor"),
     (False, 0.40, True, "not_detected"),
     (False, 0.40, False, "not_detected"),
-    (False, 0.01, False, "not_tested"),
 ])
 def test_step_outcome_rests_on_the_test_decision_alone(accepted, p, below_floor, expected):
     from model_selection.selection.greedy import STEP_OUTCOMES, SelectionStep, step_outcome

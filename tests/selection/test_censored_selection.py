@@ -2,9 +2,7 @@
 Selection with censored candidates and observations (docs/methods.md,
 Censoring at high flow): candidates enter tests censored, but every
 conditioning set holds the selected formulations' uncensored values, in the
-selection rounds, the comparisons with other candidates and the CMI tier's
-escalation guard; the CMI tier's surrogate candidates are built uncensored
-and then censored at the candidate's threshold.
+selection rounds and the comparisons with other candidates.
 """
 import numpy as np
 import pytest
@@ -52,8 +50,6 @@ def test_without_separate_conditioning_values_the_candidates_condition():
     rng = np.random.default_rng(1)
     s = SelectionSample({"a": rng.normal(size=5)}, rng.normal(size=5), np.arange(5), 0)
     assert s.conditioning_series is s.candidates
-    values, censor = s.surrogate_source("a")
-    assert values is s.candidates["a"] and censor is None
 
 
 def test_conditioning_and_censored_records_must_cover_the_candidates():
@@ -91,43 +87,6 @@ def test_subsampling_keeps_conditioning_values_censoring_records_and_thresholds(
     assert sub.grid_step == 3.0
 
 
-def test_calibration_receives_the_uncensored_candidate_and_its_censoring():
-    s = _censored_sample()
-    seen = {}
-
-    def calibration(candidate, obs, conditioning, time_positions, lag, rng, grid_step=None, censor=None, period_starts=None):
-        seen.update(candidate=np.array(candidate), conditioning=np.array(conditioning), censor=censor)
-        return {"calibrated": True, "n_surrogates": 1, "false_acceptances": 0, "p_value": 1.0}
-
-    tier = Tier("recording", RecordingTest({"a": 0.5, "b": 0.0, "c": 0.0}), 0.02, calibration=calibration)
-    greedy_forward_selection(s, tier, 99, rng=np.random.default_rng(3))
-    assert np.array_equal(seen["candidate"], s.censored.uncensored["a"])
-    assert np.array_equal(seen["conditioning"], s.covariates)
-    probe = np.linspace(-3, 3, N)
-    assert np.array_equal(seen["censor"](probe), np.maximum(probe, s.censored.thresholds["a"]))
-
-
-def test_escalation_guard_uses_the_cmi_tiers_own_uncensored_conditioning_and_surrogate_source():
-    from model_selection.selection.tiers import _guard_on_own_sample
-    own = _censored_sample(seed=5)
-    seen = {}
-
-    def calibration(candidate, obs, conditioning, time_positions, lag, rng, grid_step=None, censor=None, period_starts=None):
-        seen.update(candidate=np.array(candidate), obs=np.array(obs), conditioning=np.array(conditioning),
-                    censor=censor)
-        return {"calibrated": True}
-
-    cmi = Tier("cmi", RecordingTest({}), 0.02, calibration=calibration, sample=own)
-    guard = _guard_on_own_sample(cmi)
-    guard(np.zeros(3), np.zeros(3), np.zeros((3, 1)), np.arange(3), 0, np.random.default_rng(0),
-          names=("b", ["a"]), censor=None)
-    assert np.array_equal(seen["candidate"], own.censored.uncensored["b"])
-    assert np.array_equal(seen["obs"], own.obs)
-    assert np.array_equal(seen["conditioning"], np.column_stack([own.covariates, own.conditioning["a"]]))
-    probe = np.linspace(-3, 3, N)
-    assert np.array_equal(seen["censor"](probe), np.maximum(probe, own.censored.thresholds["b"]))
-
-
 def test_comparisons_with_other_candidates_condition_on_uncensored_values(monkeypatch):
     import model_selection.selection.equivalence as eq
     s = _censored_sample()
@@ -150,27 +109,3 @@ def test_comparisons_with_other_candidates_condition_on_uncensored_values(monkey
     assert len(calls) == 2                                                # two comparisons, one direction
 
 
-def test_calibration_surrogates_are_built_uncensored_and_censored_at_the_candidates_threshold():
-    from model_selection.statistics.conditional_independence.calibration import cmi_calibration
-    rng = np.random.default_rng(6)
-    n = 400
-    z = rng.normal(size=(n, 2))
-    uncensored = z.sum(axis=1) + rng.normal(size=n)
-    t = Censoring(0.9).threshold(uncensored)
-    surrogates = []
-
-    class Capture:
-        def sequential_p_value(self, surrogate, *args, **kwargs):
-            surrogates.append(np.array(surrogate).ravel())
-            return 0.0, np.zeros(1), 1.0
-
-    for censor in (lambda v: Censoring.apply(v, t), None):
-        surrogates.clear()
-        cmi_calibration(Capture(), uncensored, rng.normal(size=n), z, np.arange(n), 0, 0.05, 0.02,
-                        np.random.default_rng(7), censor=censor)
-        assert len(surrogates) > 10
-        for sur in surrogates:
-            if censor is not None:
-                assert sur.min() == t and np.mean(sur == t) == pytest.approx(0.9, abs=0.06)
-            else:
-                assert np.mean(sur == sur.min()) < 0.01                   # no point mass without censoring

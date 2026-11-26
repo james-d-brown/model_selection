@@ -185,26 +185,34 @@ def information_equivalence(
     context_of, _ = _contexts(sample, tier, tiers)
     final = list(selection.selected)
     tier_of = _final_tiers(selection)
-    records = []
+    # Every comparison is independent of the others: all of them, for every
+    # selected formulation, run in one parallel region, each with its own
+    # random stream, split from the run's in a fixed order (one stream per
+    # selected formulation, then one per formulation compared with it), so
+    # results do not depend on the number of workers (apart from rounding).
+    members, jobs = [], []
     for w, stream in zip(final, rng.spawn(len(final))):
         ctx = context_of(tier_of.get(w))
-        candidates = ctx.candidates
         rest = [m for m in final if m != w]
-        others = [c for c in candidates if c not in final]
+        others = [c for c in ctx.candidates if c not in final]
         if not others:
             continue
+        members.append((w, ctx, rest, others))
         z_rest = ctx.z(rest)
+        jobs += [(ctx, w, z_rest, c, sub) for c, sub in zip(others, stream.spawn(len(others)))]
 
-        # The comparisons are independent: they run in parallel, each with its own random stream, split from the
-        # run's in a fixed order, so results do not depend on the number of workers (apart from rounding).
-        def compare(job, ctx=ctx, w=w, z_rest=z_rest):
-            c, sub = job
-            c_conditioning = as2d(ctx.sample.conditioning_series[c])
-            z_with_c = c_conditioning if z_rest is None else np.hstack([z_rest, c_conditioning])
-            reverse = ctx.adds(w, ctx.candidates[w], z_with_c, n_permutations, sub, alpha)
-            return {"candidate": c, "relation": _relation(reverse), "selected_adds_beyond_candidate": reverse}
-        with timing.timed(f"comparisons of '{w}' with {len(others)} formulations ({ctx.tier.name} tier)"):
-            comparisons = parallel_map(compare, list(zip(others, stream.spawn(len(others)))))
+    def compare(job):
+        ctx, w, z_rest, c, sub = job
+        c_conditioning = as2d(ctx.sample.conditioning_series[c])
+        z_with_c = c_conditioning if z_rest is None else np.hstack([z_rest, c_conditioning])
+        reverse = ctx.adds(w, ctx.candidates[w], z_with_c, n_permutations, sub, alpha)
+        return {"candidate": c, "relation": _relation(reverse), "selected_adds_beyond_candidate": reverse}
+
+    with timing.timed(f"comparisons of {len(members)} selected formulations with {len(jobs)} pairs in all"):
+        results = parallel_map(compare, jobs)
+    records, i = [], 0
+    for w, ctx, rest, others in members:
+        comparisons, i = results[i:i + len(others)], i + len(others)
         records.append({"selected": w, "given": rest, "tier": ctx.tier.name, "alpha": alpha,
                         "effect_size_floor": ctx.tier.effect_size_floor, "comparisons": comparisons})
         summary = "; ".join(f"{cmp['candidate']}: {cmp['relation'].replace('_', ' ')}" for cmp in comparisons)
@@ -306,13 +314,9 @@ def _not_tested_reason(selection: SelectionResult) -> str | None:
         return "the last round was untestable for too few clusters of events"
     if selection.ill_posed_reason:
         return f"the last round could not be tested ({selection.ill_posed_reason})"
-    if selection.next_tier_unsupported is not None:
-        return f"a needed escalation was unsupported ({selection.next_tier_unsupported})"
     last = selection.trajectory[-1] if selection.trajectory else None
     if last is None or last.accepted:
         return "selection ended without a round that accepted none"
-    if last.outcome == "not_tested" or (last.cmi_calibration is not None and not last.cmi_calibration["calibrated"]):
-        return "the free-form tier's acceptance was withheld (not calibrated on the sample)"
     return None
 
 

@@ -116,7 +116,7 @@ model_selection/
 │   │   ├── results.py     result types and their JSON form
 │   │   └── orchestration.py   run_basin: every pathway for one basin
 │   └── visualization/     Plotly figures and HTML writers
-├── scripts/               multi-basin summary table; HTML rendering of the docs and Figure 1; diagnostics/ (calibration and event-construction checks)
+├── scripts/               multi-basin summary table; HTML rendering of the docs and Figure 1; diagnostics/ (known-answer tests)
 ├── tests/                 mirrors the package layout
 ├── docs/methods.md        methods, assumptions and references
 └── LICENSE                Apache License, Version 2.0

@@ -145,6 +145,13 @@ class FunctionalFormTest(ABC):
     statistic and the null model; this class supplies the residual-resampling
     null, p-value correction, effect-size gate and result packaging."""
 
+    def _run_state(self):
+        """State that holds for one call of run, kept per thread, so that one
+        test object can run in several threads at once (the power tests of a
+        round's remaining candidates run in parallel)."""
+        import threading
+        return self.__dict__.setdefault("_thread_state", threading.local())
+
     # Subclasses that accept multivariate candidate/obs set this True.
     _supports_multivariate: bool = False
 

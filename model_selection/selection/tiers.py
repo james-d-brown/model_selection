@@ -14,7 +14,7 @@ effect-size floor (see docs/methods.md, The three tiers).
               with the observations vary across the states of the
               conditioning set? a kernel interaction test).
   cmi       : the free-form tier, conditional mutual information; no
-              escalation test, and a calibration test before it is used.
+              escalation test.
 """
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ from model_selection.statistics.adequacy.linearity import (
     make_linearity_adequacy_test, make_multivariate_linearity_adequacy_test,
 )
 from model_selection.statistics.adequacy.specification import linear_specification_test
-from model_selection.statistics.conditional_independence.calibration import cmi_calibration
 from model_selection.statistics.adequacy.state_independence import make_state_independence_adequacy_test
 from model_selection.statistics.association.base import StructuralCheckFunc
 from model_selection.statistics.association.canonical import partial_cca_structural_adequacy
@@ -96,9 +95,9 @@ class SelectionSample:
         (docs/methods.md, Censoring at high flow).
     censored : the candidates' uncensored values and censoring thresholds
         when the candidates and observations are censored
-        (preprocessing.censoring.CensoredSeries), so that the CMI tier's
-        surrogate candidates can be built uncensored and then censored;
-        None otherwise.
+        (preprocessing.censoring.CensoredSeries), so that a subsample of the
+        rows can be censored again with its uncensored values; None
+        otherwise.
     thinned_from : the record this sample was thinned from, when a tier runs
         on a subsample of it (the pooled pathway's nonlinear and CMI tiers),
         so that the information lost by thinning can be measured; None
@@ -146,14 +145,6 @@ class SelectionSample:
     def conditioning_series(self) -> dict[str, np.ndarray]:
         """The values each formulation takes in the conditioning set."""
         return self.candidates if self.conditioning is None else self.conditioning
-
-    def surrogate_source(self, name: str) -> tuple[np.ndarray, Callable | None]:
-        """(values, censor) for the CMI tier's surrogate candidates of `name`:
-        its values and None, or, with censoring, its uncensored values and the
-        function that censors a surrogate at its threshold."""
-        if self.censored is None:
-            return self.candidates[name], None
-        return self.censored.uncensored[name], lambda values: self.censored.censor(name, values)
 
     def subset(self, idx: np.ndarray, time_positions: np.ndarray, grid_step: float | None) -> "SelectionSample":
         """The sample at rows idx (a subsample of the record), with the given
@@ -219,8 +210,6 @@ class Tier:
     adequacy_n_permutations: int = 200
     adequacy_alpha: float = 0.05
     adequacy_floor: float = 0.02
-    calibration: Callable | None = None
-    escalation_guard: Callable | None = None
     structural_check: StructuralCheckFunc | None = None
     sample: SelectionSample | None = None
     diagnostic_plots: list[AdequacyPlotFunc] = field(default_factory=list)
@@ -341,8 +330,6 @@ def build_tier(
         tier = Tier("cmi", CMITest(k=selection.cmi_k,
                                    n_neighbors=selection.n_neighbors, workers=workers,
                                    run_length=run, theiler_window=selection.theiler_window), floor)
-        if selection.cmi_calibration:
-            tier.calibration = _cmi_calibration(tier, selection)
         if a is None:
             # without the cascade there is no rejected nonlinear trial to show
             # whether effect modification is present, so show it here
@@ -354,18 +341,6 @@ def build_tier(
         tier.adequacy_alpha = a.alpha
         tier.adequacy_floor = adequacy_floor
     return tier
-
-
-def _cmi_calibration(tier: Tier, selection: SelectionConfig) -> Callable:
-    """The CMI tier's calibration on surrogate candidates for one state
-    (statistics.conditional_independence.calibration)."""
-    def _calibrate(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, censor=None,
-                   period_starts=None):
-        return cmi_calibration(tier.test, candidate, obs, conditioning, time_positions, dependence_lag,
-                               selection.alpha, tier.effect_size_floor, rng,
-                               rate_ratio=selection.cmi_calibration_rate_ratio,
-                               grid_step=grid_step, censor=censor, period_starts=period_starts)
-    return _calibrate
 
 
 def build_cascade(
@@ -384,31 +359,4 @@ def build_cascade(
     for tier in tiers:
         tier.sample = (tier_samples or {}).get(tier.name)
     tiers[2].adequacy_checks = []
-    # Escalation to the CMI tier only where that tier is calibrated on the sample.
-    tiers[1].escalation_guard = _guard_on_own_sample(tiers[2])
     return tiers
-
-
-def _guard_on_own_sample(cmi: Tier) -> Callable | None:
-    """The CMI tier's calibration, judged on the sample that tier would use.
-    When the CMI tier has its own sample (a long pooled record), the
-    candidate and the conditioning set of the round that leads there are
-    rebuilt from it by name, so the check is not made on the nonlinear tier's
-    sample, which is spaced differently."""
-    if cmi.calibration is None:
-        return None
-    if cmi.sample is None:
-        return lambda *args, names=None, **kwargs: cmi.calibration(*args, **kwargs)
-
-    def _guard(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, names=None,
-               censor=None, period_starts=None):
-        own = cmi.sample
-        name, selected = names
-        parts = (([] if own.covariates is None else [as2d(own.covariates)])
-                 + [as2d(own.conditioning_series[s]) for s in selected])
-        z = np.hstack(parts) if parts else None
-        values, own_censor = own.surrogate_source(name)
-        extra = {} if own_censor is None else {"censor": own_censor}
-        return cmi.calibration(values, own.obs, z, own.time_positions, own.dependence_lag, rng,
-                               grid_step=own.grid_step, period_starts=own.period_starts, **extra)
-    return _guard

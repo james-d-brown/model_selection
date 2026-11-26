@@ -277,7 +277,7 @@ class MultivariateLinearityTest(FunctionalFormTest):
         current test (run), else REML on these data."""
         if self.ridge_lambda is not None:
             return self.ridge_lambda
-        fixed = self.__dict__.get("_fixed_lambda")
+        fixed = getattr(self._run_state(), "fixed_lambda", None)
         return fixed if fixed is not None else reml_kernel_ridge_lambda(K_linear, obs_resid)
 
     def run(self, candidate, obs, conditioning, *args, **kwargs):
@@ -287,10 +287,10 @@ class MultivariateLinearityTest(FunctionalFormTest):
             if self.ridge_lambda is None:
                 c = residualize_on_conditioning(np.asarray(candidate, dtype=float), conditioning)
                 o = residualize_on_conditioning(as2d(np.asarray(obs, dtype=float)), conditioning)
-                self.__dict__["_fixed_lambda"] = reml_kernel_ridge_lambda(c @ c.T, o)
+                self._run_state().fixed_lambda = reml_kernel_ridge_lambda(c @ c.T, o)
             return super().run(candidate, obs, conditioning, *args, **kwargs)
         finally:
-            self.__dict__.pop("_fixed_lambda", None)
+            self._run_state().__dict__.pop("fixed_lambda", None)
 
 
 

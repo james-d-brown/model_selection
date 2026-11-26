@@ -229,7 +229,7 @@ def run_pooled_analysis(
     pearson_transformed = pearson_with_observations(obs_t[rows], {k: v[rows] for k, v in candidates_t.items()})
     log_pearson(gage, label, "every complete time step", pearson, pearson_transformed)
     result = PooledResult(
-        seed=seed, meaningful_r2=selection.meaningful_r2, cmi_calibration=selection.cmi_calibration,
+        seed=seed, meaningful_r2=selection.meaningful_r2,
         gage=gage, n_timesteps=n_grid, n_complete_timesteps=n, missing_values=missing_values,
         zero_flow_fraction=zero_flow, zero_flow_flag=zero_flow_flag,
         selection=outcome.selection, min_temporal_lag=min_temporal_lag,

@@ -272,16 +272,6 @@ def test_standardize_keeps_tied_values_together_and_equalizes_scale():
     assert np.allclose(s[:, :2].mean(axis=0), 0) and np.allclose(s[:, :2].std(axis=0), 1)
     assert np.all(s[:, 2] == 0)
 
-def test_calibration_surrogate_count_detects_three_times_alpha():
-    from scipy.stats import binom
-    from model_selection.statistics.conditional_independence.calibration import (
-        binomial_rejection_count, surrogates_needed)
-    n = surrogates_needed(0.05, 3.0)
-    k = binomial_rejection_count(n, 0.05)
-    assert n == 52 and binom.sf(k - 1, n, 0.05) <= 0.05 and binom.sf(k - 1, n, 0.15) >= 0.8
-    assert binom.sf(k - 1, n - 1, 0.15) < 0.8 or binom.sf(k - 2, n - 1, 0.05) > 0.05
-
-
 def test_sequential_p_value_stops_early_only_when_clearly_not_significant():
     from model_selection.statistics.conditional_independence import CMITest
     rng = np.random.default_rng(0)
@@ -296,7 +286,6 @@ def test_sequential_p_value_stops_early_only_when_clearly_not_significant():
     informative = o + 0.1 * rng.normal(size=(n, 1))
     _, draws, p = test.sequential_p_value(informative, o, z, 200, np.random.default_rng(2), pos, 1, 10)
     assert len(draws) == 200 and p < 0.05
-
 
 
 def test_sequential_stopping_gives_the_full_tests_decision():

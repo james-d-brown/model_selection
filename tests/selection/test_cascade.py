@@ -207,35 +207,10 @@ def test_real_cascade_escalates_for_a_remaining_candidate_that_is_not_the_winner
     assert "the remaining candidate 'curve'" in linear_trial.stopped_reason
 
 
-def test_the_escalation_calibration_check_uses_the_cmi_tiers_own_sample():
-    """With a separate free-form sample (a long pooled record), the check that
-    guards escalation to the free-form tier rebuilds the round's candidate and
-    conditioning set from that sample by name."""
-    rng = np.random.default_rng(9)
-    own = SelectionSample({"a": rng.normal(size=30), "b": rng.normal(size=30)}, rng.normal(size=30),
-                          np.arange(0, 300, 10), 10, grid_step=10)
-    tiers = build_cascade(SelectionConfig(), AdequacyConfig(), False, tier_samples={"cmi": own})
-    seen = {}
-
-    def calibration(candidate, obs, conditioning, time_positions, dependence_lag, rng, grid_step=None, period_starts=None):
-        seen.update(candidate=candidate, obs=obs, conditioning=conditioning, t=time_positions, step=grid_step)
-        return {"calibrated": True}
-
-    tiers[2].calibration = calibration
-    from model_selection.selection.tiers import _guard_on_own_sample
-    guard = _guard_on_own_sample(tiers[2])
-    other = np.zeros(100)
-    guard(other, other, other[:, None], np.arange(100), 1, rng, grid_step=1, names=("b", ["a"]))
-    assert seen["candidate"] is own.candidates["b"] and seen["obs"] is own.obs and seen["t"] is own.time_positions
-    assert np.array_equal(seen["conditioning"], own.candidates["a"][:, None]) and seen["step"] == 10
-
-
-def _power_only_escalation(first_name, effects, guard=None):
+def _power_only_escalation(first_name, effects):
     """A tier whose relationship check rejects for every candidate it does not accept."""
-    tier = Tier(first_name, StubTest(effects), 0.02, [AdequacyCheck(
+    return Tier(first_name, StubTest(effects), 0.02, [AdequacyCheck(
         "relation", lambda *a, **k: AdequacyTestOutcome(False, "rejected: x", 0.001), stage="relationship")])
-    tier.escalation_guard = guard
-    return tier
 
 
 def test_a_power_only_escalation_continues_from_the_current_selection():
@@ -259,36 +234,6 @@ def test_a_validity_escalation_restarts_from_an_empty_selection():
     res = run_tiered_selection(_sample(), [first, second], 99, rng=np.random.default_rng(4))
     assert res.committed_tier == "t2" and res.selection.selected == ["a"]
     assert all(st.tier == "t2" for st in res.selection.trajectory)
-
-
-def test_after_a_power_only_escalation_to_an_unusable_tier_the_current_selection_stands():
-    """When the tier a power-only departure leads to is not calibrated on its
-    sample, it is not run, and the current tier's valid selection stands."""
-    guard = lambda *a, **k: {"calibrated": False, "false_acceptances": 9, "n_surrogates": 52, "p_value": 0.001}
-    first = _power_only_escalation("t1", {"a": 0.5, "b": 0.0}, guard)
-    second = Tier("t2", StubTest({"a": 0.5, "b": 0.0}), 0.02)
-    sample = _sample()
-    sample.covariates = np.zeros((len(sample.obs), 1))
-    res = run_tiered_selection(sample, [first, second], 99, rng=np.random.default_rng(3))
-    assert res.committed_tier == "t1" and res.selection.selected == ["a"] and not res.selection.tier_rejected
-    attempts = [a.to_record() for a in res.attempted_tiers]
-    assert [(a["tier"], a["committed"], a["run"]) for a in attempts] == [("t1", True, True), ("t2", False, False)]
-    assert "selection stands" in attempts[1]["reason"] and "not calibrated" in attempts[1]["reason"]
-    assert not second.test.calls
-
-
-def test_review_flags_report_an_unsupported_escalation():
-    from model_selection.pipeline.results import PooledResult, review_flags
-    from model_selection.selection.greedy import SelectionResult
-    attempts = [{"tier": "linear", "committed": False, "reason": "tier rejected", "run": True,
-                 "provisional_selection": ["a", "b"]},
-                {"tier": "nonlinear", "committed": True, "reason": "not run: ... no selection can be supported",
-                 "run": False, "provisional_selection": []}]
-    base = dict(gage="g", n_timesteps=10, n_complete_timesteps=10, measure="cascade", selection=SelectionResult(),
-                zero_flow_fraction={}, zero_flow_flag=False, min_temporal_lag=1, committed_tier="nonlinear")
-    flags = review_flags(PooledResult(**base, attempted_tiers=attempts))
-    flag = next(f for f in flags if f["code"] == "escalation_unsupported")
-    assert "linear tier: ['a', 'b']" in flag["message"]
 
 
 def test_the_test_that_led_to_the_next_tier_is_recorded_and_flagged():

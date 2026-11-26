@@ -219,10 +219,11 @@ class StateIndependenceTest(FunctionalFormTest):
 
     def _spectra(self, candidate, conditioning) -> dict:
         """Spectra for these exact arrays, reused across draws of one test."""
-        cached = self.__dict__.get("_spectra_cache")
+        state = self._run_state()
+        cached = getattr(state, "spectra_cache", None)
         if cached is None or cached[0] is not candidate or cached[1] is not conditioning:
             cached = (candidate, conditioning, interaction_spectra(candidate, conditioning))
-            self.__dict__["_spectra_cache"] = cached
+            state.spectra_cache = cached
         return cached[2]
 
     def _penalties(self, candidate, obs, conditioning) -> tuple[float, float]:
@@ -232,7 +233,7 @@ class StateIndependenceTest(FunctionalFormTest):
         REML on these data."""
         if self.ridge_lambda is not None:
             return self.ridge_lambda, self.ridge_lambda
-        fixed = self.__dict__.get("_fixed_penalties")
+        fixed = getattr(self._run_state(), "fixed_penalties", None)
         if fixed is not None:
             return fixed
         spectra = self._spectra(candidate, conditioning)
@@ -352,15 +353,15 @@ class StateIndependenceTest(FunctionalFormTest):
         try:
             if has_conditioning and self.ridge_lambda is None:
                 # Penalties estimated once, on the observed data, and held fixed in every draw.
-                self.__dict__["_fixed_penalties"] = self._penalties(candidate, obs, conditioning)
+                self._run_state().fixed_penalties = self._penalties(candidate, obs, conditioning)
             result = super().run(
                 candidate, obs, conditioning,
                 time_positions=time_positions, min_temporal_lag=block_min_temporal_lag,
                 n_permutations=n_permutations, rng=rng, grid_step=grid_step,
             )
         finally:
-            self.__dict__.pop("_spectra_cache", None)
-            self.__dict__.pop("_fixed_penalties", None)
+            self._run_state().__dict__.pop("spectra_cache", None)
+            self._run_state().__dict__.pop("fixed_penalties", None)
         result.dependence_aware_subsampling_used = was_subsampled
         result.n_after_subsampling = candidate.shape[0]
         result.natural_independent_sample_size = natural_independent_n

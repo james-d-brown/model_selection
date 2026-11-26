@@ -47,7 +47,6 @@ rows = {"start": 92, "score": 170, "best": 240, "c1": 315, "test": 405, "res": 5
 BW, BH, BH3 = 230, 44, 60
 FRAME_H = 655
 bus_y, end_y = 725, 795
-FF = {"cal": 92, "start": 170, "score": 240, "best": 315, "test": 405, "cal2": 520, "acc": 615}
 
 # frames and titles
 for key, title in (("lin", "Linear tier"), ("non", "Nonlinear tier"), ("ff", "Free-form tier")):
@@ -59,17 +58,15 @@ boxes = {}
 L, N, F = cols["lin"], cols["non"], cols["ff"]
 boxes["lin", "start"] = box(L, rows["start"], BW, BH, ["Start: empty selection"], "start", bold=True)
 boxes["non", "start"] = box(N, rows["start"], BW, BH, ["New trial: empty selection,", "or the selection so far"], "trial")
-boxes["ff", "cal"] = box(F, FF["cal"], BW + 40, BH, ["Calibration test: is the free-form", "tier calibrated on the sample?"], "check")
-boxes["ff", "start"] = box(F, FF["start"], BW, BH, ["Continue from the", "selection so far"], "trial")
-for key, r in (("lin", rows), ("non", rows), ("ff", FF)):
+boxes["ff", "start"] = box(F, rows["start"], BW, BH, ["Continue from the", "selection so far"], "trial")
+for key in cols:
     x = cols[key]
-    boxes[key, "score"] = box(x, r["score"], BW, BH, ["Score each remaining", "candidate"], "box")
-    boxes[key, "best"] = box(x, r["best"], BW, BH, ["Take the highest-scoring", "candidate"], "box")
-    boxes[key, "test"] = box(x, r["test"], BW + 20, BH3, ["Acceptance test: does it add", "significant information, at", "least the acceptance floor?"], "box")
+    boxes[key, "score"] = box(x, rows["score"], BW, BH, ["Score each remaining", "candidate"], "box")
+    boxes[key, "best"] = box(x, rows["best"], BW, BH, ["Take the highest-scoring", "candidate"], "box")
+    boxes[key, "test"] = box(x, rows["test"], BW + 20, BH3, ["Acceptance test: does it add", "significant information, at", "least the acceptance floor?"], "box")
 boxes["lin", "acc"] = box(L - 95, rows["res"], 170, BH3, ["Add it to the", "selection.", "Candidates left?"], "acc")
 boxes["non", "acc"] = box(N - 95, rows["res"], 170, BH3, ["Add it to the", "selection.", "Candidates left?"], "acc")
-boxes["ff", "cal2"] = box(F - 95, FF["cal2"], 170, BH3, ["Calibration test: is the", "tier calibrated, given the", "current selection?"], "check")
-boxes["ff", "acc"] = box(F - 95, FF["acc"], 170, BH3, ["Add it to the", "selection.", "Candidates left?"], "acc")
+boxes["ff", "acc"] = box(F - 95, rows["res"], 170, BH3, ["Add it to the", "selection.", "Candidates left?"], "acc")
 boxes["lin", "c1"] = box(L, rows["c1"], BW + 80, BH, ["Linear adjustment test: can the dependence", "on Z and V be removed linearly?"], "check")
 boxes["lin", "c2"] = box(L + 100, rows["res"] + 8, 190, 76, ["Each remaining candidate:", "does it relate nonlinearly", "to the observations, or vary", "across states?"], "check")
 boxes["non", "c3"] = box(N + 100, rows["res"] + 8, 190, 76, ["Each remaining candidate:", "does its relationship with", "the observations vary", "across states?"], "check")
@@ -80,7 +77,6 @@ end = box(N, end_y, 300, BH, ["End: the selected formulations"], "start", bold=T
 for key in cols:
     path([bot(boxes[key, "start"]), top(boxes[key, "score"])])
     path([bot(boxes[key, "score"]), top(boxes[key, "best"])])
-path([bot(boxes["ff", "cal"]), top(boxes["ff", "start"])]); label(F + 8, (FF["cal"] + FF["start"]) / 2 + 4, "yes")
 path([bot(boxes["lin", "best"]), top(boxes["lin", "c1"])])
 path([bot(boxes["lin", "c1"]), top(boxes["lin", "test"])]); label(L + 6, rows["c1"] + 44, "yes")
 for key in ("non", "ff"):
@@ -93,8 +89,7 @@ def down(src, dst, lab):
 
 down(("lin", "test"), ("lin", "acc"), "yes"); down(("lin", "test"), ("lin", "c2"), "no")
 down(("non", "test"), ("non", "acc"), "yes"); down(("non", "test"), ("non", "c3"), "no")
-down(("ff", "test"), ("ff", "cal2"), "yes")
-path([bot(boxes["ff", "cal2"]), top(boxes["ff", "acc"])]); label(boxes["ff", "acc"][0] + 6, bot(boxes["ff", "cal2"])[1] + 22, "yes")
+down(("ff", "test"), ("ff", "acc"), "yes")
 
 # accept -> next round (yes): out of the left side, up the column's left margin, into the score box
 for key in cols:
@@ -112,15 +107,8 @@ for key in cols:
     ab = boxes[key, "acc"]; drop(ab[0], bot(ab)[1], bot(ab)[1] + 18)
 for key, ck in (("lin", "c2"), ("non", "c3")):
     cb = boxes[key, ck]; drop(cb[0], bot(cb)[1], bot(cb)[1] + 18)
-# free-form: not calibrated after accepting -> end (from the right side of the box, down to the bus)
-c2b = boxes["ff", "cal2"]; x2 = F + 20
-path([right(c2b), (x2, c2b[1]), (x2, bus_y)], arrow=False); label(right(c2b)[0] + 6, c2b[1] - 7, "no"); xs.append(x2)
 # free-form: test not passed -> end
 tb = boxes["ff", "test"]; drop(F + 100, tb[1] + tb[3] / 2, tb[1] + tb[3] / 2 + 22)
-# free-form tier not calibrated on entry -> end: the nonlinear tier's selection stands (the departure concerns power only)
-cal = boxes["ff", "cal"]; cx_end = F + CW / 2 - 14
-path([right(cal), (cx_end, cal[1]), (cx_end, bus_y)], arrow=False); label(right(cal)[0] + 8, cal[1] - 7, "no")
-xs.append(cx_end)
 out.append(f'<path d="M {min(xs)},{bus_y} L {max(xs)},{bus_y}" stroke="{C["line"]}" stroke-width="1.4"/>')
 path([(end[0], bus_y), top(end)])
 
@@ -139,7 +127,7 @@ escalate(boxes["lin", "c1"], boxes["non", "start"], edge1, edge1 + GAP / 3, rows
 escalate(boxes["lin", "c2"], boxes["non", "start"], edge1, edge1 + 2 * GAP / 3, rows["start"] + 14, "yes",
          "continue", entry_below=True)
 edge2 = N + CW / 2
-escalate(boxes["non", "c3"], boxes["ff", "cal"], edge2, edge2 + GAP / 2, FF["cal"], "yes", "continue")
+escalate(boxes["non", "c3"], boxes["ff", "start"], edge2, edge2 + GAP / 2, rows["start"], "yes", "continue")
 
 svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
        f'aria-label="Flow of the cascade across the three tiers">'

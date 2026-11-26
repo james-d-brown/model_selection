@@ -90,11 +90,6 @@ class SelectionConfig:
         escalation floor for the candidate linearity and effect-modification
         tests (AdequacyConfig.effect_size_floor). See docs/methods.md, Step
         outcomes and the meaningful-effect threshold.
-    cmi_calibration : check the CMI tier's calibration on surrogate
-        candidates before it accepts a candidate or the cascade escalates to
-        it. On by default in both pathways; turning it off saves
-        computation (52 surrogate tests per use at alpha = 0.05), and a CMI
-        selection made without it is flagged for review.
     backward_pass : after forward selection, test each selected formulation,
         in selection order, given the other formulations still selected, and
         remove it at once if it adds no information (docs/methods.md,
@@ -106,10 +101,6 @@ class SelectionConfig:
         Interchangeable formulations). Reported only; one test per selected
         formulation per formulation not selected, plus the tests that verify
         equally supported sets.
-    cmi_calibration_rate_ratio : the CMI tier's calibration on surrogate
-        candidates uses as many surrogates as needed to detect, with 80%
-        power, a false-acceptance rate this many times alpha
-        (docs/methods.md, Free-form tier).
     min_samples_per_dimension : a selection step is flagged for review when
         its samples per dimension (candidate, observations and selected set
         together) fall below this value. A heuristic, by analogy with
@@ -127,7 +118,8 @@ class SelectionConfig:
         as n * rank^2. None uses exact factors at every size (O(n^3)).
     n_jobs : threads for the analysis's independent computations
         (model_selection.parallel): the candidates' effect sizes, the
-        eigendecompositions and kernel factors a round needs, the
+        eigendecompositions and kernel factors a round needs, the nonlinear
+        tier's bootstrap draws, a round's validity and power tests, the
         comparisons and the checks of equally supported sets. None (default)
         uses every core, 1 runs them in sequence. Results do not depend on
         it, apart from rounding.
@@ -145,8 +137,6 @@ class SelectionConfig:
     theiler_window: int | None = None
     cmi_max_n: int = 2000
     nonlinear_max_n: int = field(default_factory=lambda: DEFAULT_NONLINEAR_MAX_N)
-    cmi_calibration: bool = True
-    cmi_calibration_rate_ratio: float = 3.0
     backward_pass: bool = True
     equivalence_checks: bool = True
     min_samples_per_dimension: float = 10.0

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from model_selection.parallel import parallel_map
 from model_selection.selection.tiers import SelectionSample, Tier
 from model_selection.timing import elapsed_since, timed
 from model_selection.statistics.power import effective_sample_size
@@ -117,7 +118,6 @@ class SelectionStep:
     tier: str | None = None
     """The tier whose test made this step (earlier tiers' accepted steps carry over after a
     power-only escalation)."""
-    cmi_calibration: dict | None = None
     samples_per_dimension: float = float("inf")
     low_samples_per_dimension: bool = False
     effective_sample_size: float | None = None
@@ -174,9 +174,6 @@ class SelectionResult:
     redundant or not tested (selection.equivalence.formulation_classes;
     docs/methods.md, Interchangeable formulations). None when the comparisons
     were not run."""
-    next_tier_unsupported: str | None = None
-    """Set on a rejected trial whose escalation leads to a tier that cannot
-    be used on its sample (not calibrated); the cascade then does not run it."""
     escalation_continues: bool = False
     """True when the trial was rejected by a power-only (relationship) test:
     its acceptances remain valid, `selected` keeps them, and the next tier
@@ -190,7 +187,6 @@ STEP_OUTCOMES = {
     "selected": "a contribution was detected, and its estimated size is at least the acceptance floor",
     "detected_below_floor": "a contribution was detected, but its estimated size is below the acceptance floor",
     "not_detected": "no contribution was detected; this is not evidence that none exists",
-    "not_tested": "no test could be relied on: the free-form tier is not calibrated on the sample",
 }
 """The outcomes of a selection step (step_outcome), with their meaning
 (docs/methods.md, Step outcomes and the meaningful-effect threshold)."""
@@ -198,15 +194,10 @@ STEP_OUTCOMES = {
 
 def step_outcome(step: "SelectionStep", alpha: float) -> str:
     """What a step's test shows, from its decision alone (STEP_OUTCOMES): its
-    acceptance, its p-value and whether its estimated size reached the floor.
-    A step that passed both gates but was not accepted had its acceptance
-    withheld by the free-form tier's calibration test: it was not tested by a
-    test that can be relied on."""
+    acceptance, its p-value and whether its estimated size reached the floor."""
     if step.accepted:
         return "selected"
-    if step.p_value >= alpha:
-        return "not_detected"
-    return "detected_below_floor" if step.magnitude_unsubstantiated else "not_tested"
+    return "not_detected" if step.p_value >= alpha else "detected_below_floor"
 
 
 def _stack_selected(candidate_series: dict, selected: list[str],
@@ -215,12 +206,6 @@ def _stack_selected(candidate_series: dict, selected: list[str],
     formulations' values; None when both are empty."""
     parts = ([] if covariates is None else [as2d(covariates)]) + [as2d(candidate_series[s]) for s in selected]
     return np.hstack(parts) if parts else None
-
-
-def _censor_kwarg(censor) -> dict:
-    """The `censor` argument of a calibration call, passed only for a
-    censored sample, so the uncensored call is unchanged."""
-    return {} if censor is None else {"censor": censor}
 
 
 def _thinning_record(record: SelectionSample, selected: list[str], winner: str, n_eff: float, n: int,
@@ -248,12 +233,6 @@ def _thinning_record(record: SelectionSample, selected: list[str], winner: str, 
     return {"n_samples": int(n), "n_samples_record": int(n_full), "effective_sample_size": float(n_eff),
             "effective_sample_size_record": float(n_eff_full),
             "information_retained": float(min(1.0, n_eff / n_eff_full)) if n_eff_full > 0 else None}
-
-
-def _calibration_summary(calibration: dict) -> str:
-    return (f"it accepted {calibration['false_acceptances']} of {calibration['n_surrogates']} surrogate candidates "
-            "that carry no information beyond the conditioning set (binomial p="
-            f"{calibration['p_value']:.3g} against the level alpha)")
 
 
 def gate(observed: float, null_column: np.ndarray, null_max: np.ndarray, alpha: float,
@@ -392,7 +371,6 @@ def greedy_forward_selection(
         # significant ones when there are any. Round 1 computes every
         # candidate's, for the report of each formulation on its own.
         ranked = result.names if (round_no == 1 or not significant) else significant
-        from model_selection.parallel import parallel_map
 
         def effect_of(nm):
             k = result.index(nm)
@@ -437,24 +415,34 @@ def greedy_forward_selection(
             if path is not None:
                 plots.append(path)
 
-        def run_checks(stage: str, name: str = winner, plot: bool = False) -> list[tuple]:
-            values = candidates[name]
-            done = []
+        def check_jobs(stage: str, names: list[str]) -> list[tuple]:
+            """(name, check, stream) for each of the stage's checks of each
+            name. Each test draws from its own stream, split from the round's
+            generator in this fixed order, so the tests are independent of each
+            other, can run in parallel, and leave the round's own draws
+            unchanged."""
             cond = z_rel if stage == "relationship" else z
-            for check in tier.adequacy_checks:
-                if check.stage != stage or (check.needs_conditioning and cond is None):
-                    continue
-                extra = {}
-                if stage == "removal" and partialled is not None:
-                    extra["interaction_with"] = partialled
-                if check.labels_columns:
-                    extra["column_labels"] = (_column_labels(f"candidate '{name}'", values, sample.feature_names)
-                                              + _column_labels("observations", obs, sample.feature_names))
-                outcome = check.test(values, obs, cond, n_permutations=tier.adequacy_n_permutations,
-                                     rng=rng, time_positions=time_positions, min_temporal_lag=lag,
+            checks = [c for c in tier.adequacy_checks
+                      if c.stage == stage and not (c.needs_conditioning and cond is None)]
+            jobs = [(nm, c) for nm in names for c in checks]
+            return [(nm, c, stream) for (nm, c), stream in zip(jobs, rng.spawn(len(jobs)))]
+
+        def run_one(job) -> tuple:
+            name, check, stream = job
+            values = candidates[name]
+            cond = z_rel if check.stage == "relationship" else z
+            extra = {}
+            if check.stage == "removal" and partialled is not None:
+                extra["interaction_with"] = partialled
+            if check.labels_columns:
+                extra["column_labels"] = (_column_labels(f"candidate '{name}'", values, sample.feature_names)
+                                          + _column_labels("observations", obs, sample.feature_names))
+            return check, check.test(values, obs, cond, n_permutations=tier.adequacy_n_permutations,
+                                     rng=stream, time_positions=time_positions, min_temporal_lag=lag,
                                      grid_step=sample.grid_step, **extra)
-                done.append((check, outcome))
-            return done
+
+        def run_checks(stage: str, name: str = winner) -> list[tuple]:
+            return parallel_map(run_one, check_jobs(stage, [name]))
 
         def record(done: list[tuple], role: str) -> list[dict]:
             return [{"check": c.name, "adequate": o.tier_adequate, "role": role, "p_value": o.p_value,
@@ -485,16 +473,6 @@ def greedy_forward_selection(
         accepted, p_value, bias_corrected = gate(
             float(result.observed[w]), null_column, null_max, alpha, tier.effect_size_floor, effect=effect)
         magnitude_unsubstantiated = bool(bias_corrected < tier.effect_size_floor)
-        # An acceptance by the CMI tier counts only where that tier is calibrated
-        # on the sample (statistics.conditional_independence.calibration).
-        calibration = None
-        if accepted and tier.calibration is not None and z is not None:
-            source, censor = sample.surrogate_source(winner)
-            with timed(f"{tier.name} round {round_no}: calibration test"):
-                calibration = tier.calibration(source, obs, z, time_positions, lag, rng.spawn(1)[0],
-                                               grid_step=sample.grid_step, period_starts=sample.period_starts,
-                                               **_censor_kwarg(censor))
-            accepted = calibration["calibrated"]
         n_dims = as2d(winner_values).shape[1] + as2d(obs).shape[1] + (0 if z is None else z.shape[1]) + k_partialled
         samples_per_dimension = n / n_dims
         k_y, k_x = as2d(obs).shape[1], as2d(winner_values).shape[1]
@@ -537,7 +515,6 @@ def greedy_forward_selection(
             low_samples_per_dimension=bool(samples_per_dimension < min_samples_per_dimension),
             effective_sample_size=n_eff,
             thinning=thinning,
-            cmi_calibration=calibration,
         ))
         if sample.clusters is not None:
             # Do the terms of the statistic stay correlated across clusters treated as independent? The terms are
@@ -553,13 +530,6 @@ def greedy_forward_selection(
                                          "cluster_terms_correlated": check["significant"]}
         logger.info(f"[+] {winner}: p={p_value:.4g}, effect {bias_corrected:.4g}, "
                     f"accepted={accepted}.")
-        if calibration is not None and not calibration["calibrated"]:
-            stopped_reason = (f"'{winner}' not selected at round {round_no}: the {tier.name} tier would accept it "
-                              f"(p={p_value:.4g}, effect {bias_corrected:.4g}), but the tier is not calibrated on "
-                              f"this sample: {_calibration_summary(calibration)}")
-            logger.info(f"[!] {stopped_reason}.")
-            trajectory[-1].adequacy = record(removal, "decision")
-            break
 
         # Relationship checks come after the decision. If the winner was accepted,
         # they are recorded for information only: the tier has already detected
@@ -587,11 +557,19 @@ def greedy_forward_selection(
             statistic = dict(zip(result.names, result.observed))
             family = [winner] + sorted((nm for nm in remaining if nm != winner),
                                        key=lambda nm: (-statistic.get(nm, 0.0), nm))
+            # Every remaining candidate's tests run together, each with its own
+            # stream; they are then read in order, best first, and reading stops
+            # at the first departure, as if they had run one after another.
+            jobs = check_jobs("relationship", family if n_relationship else [])
+            with timed(f"{tier.name} round {round_no}: power tests of {len(family) if n_relationship else 0} "
+                       "remaining candidates"):
+                outcomes = parallel_map(run_one, jobs)
+            checked_by = {}
+            for (nm, _, _), done in zip(jobs, outcomes):
+                checked_by.setdefault(nm, []).append(done)
             for nm in (family if n_relationship else []):
                 departing = None
-                with timed(f"{tier.name} round {round_no}: power tests of '{nm}'"):
-                    checked = run_checks("relationship", nm)
-                for check, outcome in checked:
+                for check, outcome in checked_by.get(nm, []):
                     departs = bool(not outcome.tier_adequate and outcome.p_value < level)
                     if nm == winner:
                         draw(check, winner, (
@@ -622,23 +600,10 @@ def greedy_forward_selection(
                                   f"{len(remaining)} remaining candidates; "
                                   f"{outcome.decision_reason})")
                 logger.info(f"[!] {stopped_reason}; escalation required, continuing from the selection so far.")
-                unsupported = None
-                # The CMI tier can be used only where it is calibrated on its
-                # sample, for the candidate that leads there; otherwise no tier
-                # whose assumptions hold can make the selection.
-                if tier.escalation_guard is not None and z is not None:
-                    source, censor = sample.surrogate_source(nm)
-                    with timed(f"{tier.name} round {round_no}: calibration test before escalation"):
-                        step.cmi_calibration = tier.escalation_guard(
-                            source, obs, z, time_positions, lag, rng.spawn(1)[0], grid_step=sample.grid_step,
-                            period_starts=sample.period_starts, names=(nm, list(selected)), **_censor_kwarg(censor))
-                    if not step.cmi_calibration["calibrated"]:
-                        unsupported = (f"the CMI tier, to which the departure leads, is not calibrated on its "
-                                       f"sample ({_calibration_summary(step.cmi_calibration)})")
                 # A relationship test concerns power only: the acceptances so far remain valid, so the next tier
                 # continues from them.
                 return finish(selected=list(selected), tier_rejected=True, tier_rejection_reason=outcome.decision_reason,
-                              next_tier_unsupported=unsupported, escalation_continues=True,
+                              escalation_continues=True,
                               escalation_test={"round": round_no, "candidate": nm, "check": check.name,
                                                "p_value": outcome.p_value, "level": level,
                                                "dependence": outcome.dependence})

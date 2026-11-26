@@ -77,8 +77,7 @@ def test_pipeline_flags_high_zero_flow():
 @pytest.mark.parametrize("measure", ["linear", "nonlinear", "cmi"])
 def test_pipeline_runs_end_to_end_across_all_measures(measure):
     basin = make_synthetic_basin(seed=4)
-    # The CMI calibration check is tested on its own (tests/selection); here only the plumbing of each measure.
-    result = run_basin(basin, SelectionConfig(measure=measure, n_permutations=50, cmi_calibration=False),
+    result = run_basin(basin, SelectionConfig(measure=measure, n_permutations=50),
                        events=HF_EVENTS, rng=np.random.default_rng(5))
     assert result.pooled.measure == measure
     assert result.high_flow is not None and result.high_flow.measure == measure
@@ -122,8 +121,7 @@ def test_pipeline_cascade_escalates_beyond_linear_through_real_api():
                       formulations={"context_model": pd.Series(context), "kinked_model": pd.Series(x)})
     with tempfile.TemporaryDirectory() as tmpdir:
         result = run_pooled_analysis(
-            # The CMI calibration check is tested on its own; here only the escalation.
-            basin, SelectionConfig(measure="cascade", n_permutations=100, min_temporal_lag=5, cmi_calibration=False),
+            basin, SelectionConfig(measure="cascade", n_permutations=100, min_temporal_lag=5),
             AdequacyConfig(n_permutations=100), OutputConfig(output_dir=tmpdir), rng=np.random.default_rng(1))
         first = result.attempted_tiers[0]
         assert (first["tier"], first["committed"]) == ("linear", False)
@@ -361,7 +359,7 @@ def test_high_flow_reports_classes_and_a_meaningful_threshold_never_stops_select
     d = high_flow_result_to_dict(unset)
     assert unset.selection is not None and "detectability" not in d
     assert all("detectability" not in s and "detectable_r2" not in s for s in d["high_flow_trajectory"])
-    assert all(s["outcome"] in ("selected", "detected_below_floor", "not_detected", "not_tested")
+    assert all(s["outcome"] in ("selected", "detected_below_floor", "not_detected")
                for s in d["high_flow_trajectory"])
     if unset.selection.selected:
         assert d["high_flow_classes"] is not None
@@ -689,34 +687,6 @@ def test_events_with_observation_gaps_stay_in_the_sample():
 
 
 @pytest.mark.integration
-def test_cmi_calibration_check_runs_through_the_pipeline_and_is_recorded():
-    # Pooled pathway, CMI tier, the calibration check on (the default): it runs on the
-    # acceptance, and its result reaches the step and the result file.
-    basin = make_synthetic_basin(seed=4)
-    result = run_pooled_analysis(basin, SelectionConfig(measure="cmi", n_permutations=50),
-                                 rng=np.random.default_rng(5))
-    checked = [s for s in result.selection.trajectory if s.cmi_calibration is not None]
-    assert checked and checked[0].cmi_calibration["n_surrogates"] == 52
-    d = pooled_result_to_dict(result)
-    assert d["cmi_calibration"] is True
-    assert any(s.get("cmi_calibration") for s in d["pooled_trajectory"])
-    json.dumps(d)
-
-
-@pytest.mark.integration
-def test_an_uncalibrated_cmi_tier_withholds_the_acceptance_through_the_pipeline():
-    import model_selection.selection.tiers as tiers
-    uncalibrated = {"n_surrogates": 52, "false_acceptances": 12, "false_acceptance_rate": 12 / 52,
-                    "p_value": 1e-5, "calibrated": False}
-    basin = make_synthetic_basin(seed=4)
-    with patch.object(tiers, "cmi_calibration", return_value=uncalibrated):
-        result = run_pooled_analysis(basin, SelectionConfig(measure="cmi", n_permutations=50),
-                                     rng=np.random.default_rng(5))
-    assert not any(s.accepted and s.cmi_calibration for s in result.selection.trajectory)
-    assert "cmi_not_calibrated" in [f["code"] for f in pooled_result_to_dict(result)["review_flags"]]
-
-
-@pytest.mark.integration
 def test_wasp_flags_a_series_whose_scale_range_is_too_short():
     """The noise formulation's e-folding time is under one step, so WASP
     cannot resolve its events; the result says which series."""
@@ -777,7 +747,7 @@ def test_long_pooled_records_give_the_nonlinear_tier_the_full_cap(monkeypatch):
                         rng=np.random.default_rng(1))
     # measure="linear" draws no tier samples; the cascade does
     run_pooled_analysis(basin, SelectionConfig(n_permutations=20, min_temporal_lag=40, nonlinear_max_n=500,
-                                               cmi_max_n=500, cmi_calibration=False, equivalence_checks=False),
+                                               cmi_max_n=500, equivalence_checks=False),
                         rng=np.random.default_rng(1))
     full, samples = captured["full"], captured["samples"]
     nonlinear, cmi = samples["nonlinear"], samples["cmi"]

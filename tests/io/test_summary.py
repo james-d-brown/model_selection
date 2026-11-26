@@ -12,7 +12,7 @@ def _pooled(flagged: bool, gage="G1"):
                          low_samples_per_dimension=flagged)
     sel = SelectionResult(selected=["m0", "m1"], trajectory=[step], stopped_reason="all candidates selected")
     return PooledResult(gage=gage, n_timesteps=100, zero_flow_fraction={}, zero_flow_flag=False, selection=sel,
-                        min_temporal_lag=3, measure="cascade", committed_tier="cmi", cmi_calibration=True)
+                        min_temporal_lag=3, measure="cascade", committed_tier="cmi")
 
 
 def test_flagged_step_produces_a_prominent_review_flag():
@@ -97,12 +97,6 @@ def test_few_blocks_produces_a_labelled_heuristic_flag():
     assert "15 bandwidths" in message and "20% too small" in message and "a convention" in message
 
 
-def test_a_pooled_cmi_selection_without_the_calibration_check_is_flagged():
-    result = _pooled(False)
-    result.cmi_calibration = False
-    assert [f["code"] for f in review_flags(result)] == ["cmi_calibration_not_checked"]
-
-
 def test_short_crossfit_blocks_and_capped_factors_produce_review_flags():
     result = _pooled(False)
     result.selection.trajectory[0].dependence = {"block_length": 3, "estimated": False, "dependence_decays": True,
@@ -155,7 +149,6 @@ def test_few_blocks_of_event_samples_produce_a_review_flag():
                           min_temporal_lag=730, measure="linear")
     flags = [f for f in review_flags(result) if f["code"] == "few_blocks"]
     assert len(flags) == 1 and "10.0" in flags[0]["message"] and "events" in flags[0]["message"]
-
 
 
 def test_few_clusters_and_correlated_cluster_terms_produce_their_flags():

@@ -85,6 +85,12 @@ def parallel_map(func: Callable, items: Iterable) -> list:
             limits.restore_original_limits()
 
 
+def in_parallel_region() -> bool:
+    """True inside a task of a parallel region (its own work then shares the
+    workers with the region's other tasks)."""
+    return getattr(_LOCAL, "depth", 0) > 0
+
+
 def run_tasks(tasks: list) -> list:
     """Run independent zero-argument tasks in one pool; results in order."""
     return parallel_map(lambda f: f(), tasks)

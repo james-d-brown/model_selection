@@ -533,7 +533,7 @@ def run_high_flow_analysis(
                if usable_events else {})
     log_pearson(gage, "high-flow", "the time steps inside the high-flow events", pearson)
     result = HighFlowResult(
-        seed=seed, cmi_calibration=selection.cmi_calibration, pearson_correlation=pearson,
+        seed=seed, pearson_correlation=pearson,
         gage=gage, n_timesteps=len(basin.obs),
         zero_flow_fraction=zero_flow, zero_flow_flag=zero_flow_flag,
         selection=result_selection, high_flow_power=power_summary,

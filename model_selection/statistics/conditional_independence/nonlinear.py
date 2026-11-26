@@ -39,7 +39,9 @@ import numpy as np
 
 from model_selection.statistics.conditional_independence.base import ConditionalIndependenceTest, JointTestResult
 from model_selection.preprocessing.censoring import censoring_record
-from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights, fixed_b_draws
+from model_selection.statistics.conditional_independence.multipliers import (
+    WeightPlan, dependent_wild_weights, draw_weights, fixed_b_draws, weights_from_draws,
+)
 from model_selection.statistics.regression.censored import censored_feature_means
 from model_selection.statistics.regression.kernel_residuals import (
     ConditioningRegression, cached_regression, feature_factor_with_cap,
@@ -388,7 +390,7 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         features = low_rank() is not None and n > low_rank()
         G_o = None if features else E_o @ E_o.T
         norm_o = float(np.linalg.norm(E_o.T @ E_o)) if features else float(np.sqrt(np.sum(G_o ** 2)))
-        from model_selection.parallel import parallel_map
+        from model_selection.parallel import batches, in_parallel_region, parallel_map, workers
         fitted = dict(zip(names, parallel_map(lambda nm: self._residuals(candidates[nm], regression), names)))
 
         def feature_terms(E_c):
@@ -418,11 +420,8 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
         # Independent units (clusters of events) use the wild cluster restricted
         # bootstrap instead of multipliers on the products (below).
         units = resolved.independent_units
-        # All candidates share one set of multipliers. They are generated in
-        # chunks of draws, and regenerated for each candidate from the same
-        # generator state, so that only one chunk and one candidate's terms are
-        # held at a time; the draws are those of a single generation of all
-        # n_resamples at once.
+        # Independent units: the wild cluster restricted bootstrap draws its
+        # signs through weight_chunks, from the generator's current state.
         start_state = rng.bit_generator.state
 
         def weight_chunks():
@@ -431,41 +430,62 @@ class NonlinearResidualTest(ConditionalIndependenceTest):
             for start in range(0, n_resamples, MULTIPLIER_CHUNK):
                 stop = min(start + MULTIPLIER_CHUNK, n_resamples)
                 yield start, stop, dependent_wild_weights(time_positions, block, stop - start, gen,
-                                                          independent="rademacher" if units else "gaussian")
+                                                          independent="rademacher")
             rng.bit_generator.state = gen.bit_generator.state
 
-        if not names:                                  # the generator advances as for any draws
+        if units and not names:                        # the generator advances as for any draws
             for _ in weight_chunks():
                 pass
         observed = np.empty(len(names))
-        null = np.empty((n_resamples, len(names)))
+        null = np.zeros((n_resamples, len(names)))
         diagnostics = {}
+        terms = {}
         k = 0 if conditioning is None else as2d(conditioning).shape[1]
         for j, nm in enumerate(names):
             E_c, _, r2_c = fitted[nm]
             if features:
                 total, Fc, denom = feature_terms(E_c)
+                observed[j] = float(total @ total) / denom if denom > 0 else 0.0
+                terms[j] = (Fc, denom)
             else:
                 A, P, denom = centred_products(E_c)
-            for start, stop, weights in ([] if units else weight_chunks()):
-                if denom > 0 and features:
-                    null[start:stop, j] = np.sum((weights @ Fc) ** 2, axis=1) / denom
-                elif denom > 0:
-                    null[start:stop, j] = np.einsum("bi,bi->b", weights @ P, weights) / denom
-                else:
-                    null[start:stop, j] = 0.0
-            if denom > 0 and features:
-                observed[j] = float(total @ total) / denom
-            elif denom > 0:
-                observed[j] = float(A.sum()) / denom
-            else:
-                observed[j] = 0.0
+                observed[j] = float(A.sum()) / denom if denom > 0 else 0.0
+                terms[j] = (P, denom)
+                del A
             diagnostics[nm] = {
                 "r2_candidate_on_selected": r2_c,
                 "r2_obs_on_selected": r2_o,
                 "samples_per_conditioning_dimension": n / max(k, 1),
                 **self.censored_path(candidates[nm], regression),
             }
+        if not units:
+            # All candidates share one set of multipliers, generated once in
+            # chunks of draws and applied to every candidate. The random draws
+            # are made in order from the run's generator, as one generation of
+            # all n_resamples would make them; turning them into multipliers
+            # and applying them runs in parallel, a group of chunks at a time,
+            # so that the chunks in memory grow with the number of workers;
+            # inside a parallel region (a comparison, say), whose other tasks
+            # share the workers, one chunk at a time.
+            plan = WeightPlan(time_positions, block, "gaussian")
+
+            def null_rows(job):
+                start, stop, draws = job
+                weights = weights_from_draws(plan, draws)
+                rows = np.zeros((stop - start, len(names)))
+                for j, (T, denom) in terms.items():
+                    if denom > 0 and features:
+                        rows[:, j] = np.sum((weights @ T) ** 2, axis=1) / denom
+                    elif denom > 0:
+                        rows[:, j] = np.einsum("bi,bi->b", weights @ T, weights) / denom
+                return start, stop, rows
+
+            chunks = [(a, min(a + MULTIPLIER_CHUNK, n_resamples)) for a in range(0, n_resamples, MULTIPLIER_CHUNK)]
+            for group in batches(chunks, workers() if in_parallel_region() else 1):
+                jobs = [(a, b, draw_weights(plan, b - a, rng)) for a, b in group]
+                for a, b, rows in parallel_map(null_rows, jobs):
+                    null[a:b] = rows
+        terms.clear()
         cluster_record = {}
         if units:
             null, cluster_record = self._cluster_restricted_null(names, fitted, obs, E_o, regression, weight_chunks)
