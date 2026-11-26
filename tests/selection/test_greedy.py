@@ -262,14 +262,18 @@ def test_the_remaining_candidates_are_one_family_at_alpha_over_m():
     assert not any(e["departs"] for e in step.other_candidates_checked)
 
 
-def test_the_winner_is_checked_first_and_a_departure_stops_further_checks():
+def test_the_winner_is_read_first_and_a_departure_stops_further_reading():
+    """The remaining candidates' power tests run together; they are read in
+    order, the winner first, and reading stops at the first departure, as if
+    they had run one after another."""
     sample = _sample(names=("a", "b", "c", "d"))
     calls = []
     tier = _tier({"a": 0.5, "b": 0.01, "c": 0.0, "d": 0.0})
     tier.adequacy_checks = [_departing_check([sample.candidates["b"]], calls=calls)]
     res = greedy_forward_selection(sample, tier, 99, rng=np.random.default_rng(10))
     assert res.tier_rejected and "rejects for 'b'" in res.stopped_reason
-    assert calls[-1] is sample.candidates["b"] and res.trajectory[-1].other_candidates_checked == []
+    assert res.trajectory[-1].other_candidates_checked == []          # nothing read after the departure
+    assert {id(c) for c in calls[-3:]} == {id(sample.candidates[nm]) for nm in "bcd"}  # all run together
 
 
 def test_the_level_divides_alpha_by_every_relationship_test_of_every_candidate():
