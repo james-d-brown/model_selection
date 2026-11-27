@@ -96,8 +96,8 @@ def run_pooled_analysis(
 
     censoring : censor the candidates and the observations at a quantile of
         each series' own record (docs/methods.md, Censoring at high flow),
-        e.g. Censoring.at_high_flow(events) for the high-flow events'
-        quantile; None (default) for the uncensored pathway.
+        e.g. Censoring() for the default quantile, 0.90; None (default) for
+        the uncensored pathway.
 
     seasonal : conditioning on the time of year (default: enabled: every
         test conditions on the seasonal phase, and the dependence lag is

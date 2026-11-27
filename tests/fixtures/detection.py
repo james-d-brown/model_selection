@@ -1,7 +1,7 @@
 """Per-model detection on plain arrays for tests (hourly index assumed)."""
 import pandas as pd
 
-from model_selection.event_detection import EventConfig, POTConfig, detect_events_per_series
+from model_selection.experimental.event_detection import EventConfig, POTConfig, detect_events_per_series
 
 
 def own_model_windows(raw_formulations, quantile_threshold=0.90, pot_ratio=2.0 / 3.0, recession_ratio=0.25,

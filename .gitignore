@@ -19,4 +19,4 @@ scripts/diagnostics/*
 !scripts/diagnostics/README.md
 
 # The test of the local event-merging diagnostic, kept locally with it
-tests/scripts/test_event_merging.py
+tests/experimental/test_event_merging.py

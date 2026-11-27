@@ -23,8 +23,10 @@ with the largest effect size is the round's winner. In order:
      related to the observations in the form the tier assumes? Recorded for
      information when the winner was accepted. When it was not, every
      remaining candidate is tested, the winner first, at alpha / (m k) for m
-     remaining candidates and k tests (Bonferroni), and the first rejection
-     discards the trial so the cascade can escalate.
+     remaining candidates and k tests (Bonferroni), each drawing resamples
+     sequentially until its decision at that level is settled
+     (docs/methods.md, Resamples per test), and the first rejection discards
+     the trial so the cascade can escalate.
 
 Selection stops at the first winner not accepted.
 """
@@ -361,8 +363,9 @@ def greedy_forward_selection(
         # selections for whichever candidate is chosen (Westfall and Young,
         # 1993), and a winner that is not accepted then means no remaining
         # candidate would be. In the linear and free-form tiers the effect size
-        # is the statistic less its chance level, so the order is the
-        # statistic's; in the nonlinear tier it is a different quantity
+        # is the statistic less the candidate's own chance level, so the winner
+        # is usually, but not necessarily, the candidate with the largest
+        # statistic; in the nonlinear tier it is a different quantity
         # (docs/methods.md, Acceptance test).
         null_max = result.null.max(axis=1)
         significant = [nm for k, nm in enumerate(result.names)
@@ -415,25 +418,31 @@ def greedy_forward_selection(
             if path is not None:
                 plots.append(path)
 
-        def check_jobs(stage: str, names: list[str]) -> list[tuple]:
-            """(name, check, stream) for each of the stage's checks of each
-            name. Each test draws from its own stream, split from the round's
-            generator in this fixed order, so the tests are independent of each
-            other, can run in parallel, and leave the round's own draws
-            unchanged."""
+        def check_jobs(stage: str, names: list[str], level: float | None = None) -> list[tuple]:
+            """(name, check, stream, level) for each of the stage's checks of
+            each name. Each test draws from its own stream, split from the
+            round's generator in this fixed order, so the tests are independent
+            of each other, can run in parallel, and leave the round's own draws
+            unchanged. level: the level the tests are made at, when below alpha
+            (the escalation family); None for alpha."""
             cond = z_rel if stage == "relationship" else z
             checks = [c for c in tier.adequacy_checks
                       if c.stage == stage and not (c.needs_conditioning and cond is None)]
             jobs = [(nm, c) for nm in names for c in checks]
-            return [(nm, c, stream) for (nm, c), stream in zip(jobs, rng.spawn(len(jobs)))]
+            return [(nm, c, stream, level) for (nm, c), stream in zip(jobs, rng.spawn(len(jobs)))]
 
         def run_one(job) -> tuple:
-            name, check, stream = job
+            name, check, stream, level = job
             values = candidates[name]
             cond = z_rel if check.stage == "relationship" else z
             extra = {}
-            if check.stage == "removal" and partialled is not None:
-                extra["interaction_with"] = partialled
+            if check.stage == "removal":
+                # The linear adjustment test divides alpha among its parts when it has several.
+                extra["resampling_risk"] = tier.adequacy_resampling_risk
+                if partialled is not None:
+                    extra["interaction_with"] = partialled
+            if level is not None:
+                extra.update(level=level, resampling_risk=tier.adequacy_resampling_risk)
             if check.labels_columns:
                 extra["column_labels"] = (_column_labels(f"candidate '{name}'", values, sample.feature_names)
                                           + _column_labels("observations", obs, sample.feature_names))
@@ -448,6 +457,7 @@ def greedy_forward_selection(
             return [{"check": c.name, "adequate": o.tier_adequate, "role": role, "p_value": o.p_value,
                      "bias_corrected_semipartial_r2": o.bias_corrected_semipartial_effect_size,
                      "block_length": o.block_length, "dependence": o.dependence,
+                     "n_resamples": o.n_draws, "settled": o.settled,
                      "decision_reason": o.decision_reason} for c, o in done]
 
         # Removal checks come first: a candidate cannot be judged if the selected
@@ -560,17 +570,20 @@ def greedy_forward_selection(
             # Every remaining candidate's tests run together, each with its own
             # stream; they are then read in order, best first, and reading stops
             # at the first departure, as if they had run one after another.
-            jobs = check_jobs("relationship", family if n_relationship else [])
+            jobs = check_jobs("relationship", family if n_relationship else [], level)
             with timed(f"{tier.name} round {round_no}: power tests of {len(family) if n_relationship else 0} "
                        "remaining candidates"):
                 outcomes = parallel_map(run_one, jobs)
             checked_by = {}
-            for (nm, _, _), done in zip(jobs, outcomes):
+            for (nm, _, _, _), done in zip(jobs, outcomes):
                 checked_by.setdefault(nm, []).append(done)
             for nm in (family if n_relationship else []):
                 departing = None
                 for check, outcome in checked_by.get(nm, []):
-                    departs = bool(not outcome.tier_adequate and outcome.p_value < level)
+                    # A test made below alpha decided at the level itself (tier_adequate); one
+                    # made at alpha (a single remaining candidate and test) is read at the level.
+                    departs = bool(not outcome.tier_adequate
+                                   and (outcome.level == level or outcome.p_value < level))
                     if nm == winner:
                         draw(check, winner, (
                             f"p = {outcome.p_value:.3g}, tested at {level:.3g}: the level α = "
@@ -587,6 +600,7 @@ def greedy_forward_selection(
                         step.other_candidates_checked.append({
                             "candidate": nm, "check": check.name, "p_value": outcome.p_value, "level": level,
                             "bias_corrected_semipartial_r2": outcome.bias_corrected_semipartial_effect_size,
+                            "n_resamples": outcome.n_draws, "settled": outcome.settled,
                             "dependence": outcome.dependence, "departs": departs})
                     if departs and departing is None:
                         departing = (check, outcome)

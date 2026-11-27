@@ -134,19 +134,29 @@ def _trace_of_draws(M: np.ndarray) -> np.ndarray:
 
 
 def chance_level(null_draws: np.ndarray, k_y: int, k_x: int) -> float:
-    """Mean of 1 - Wilks' lambda for the number of independent samples whose
-    null mean of Pillai's trace matches the candidate's own null draws.
+    """Chance level of the linear tier's effect size: its null mean for the
+    number of independent samples whose null mean of the statistic matches the
+    candidate's own null draws.
 
-    For n independent samples the null mean of Pillai's trace is
-    k_y k_x / (n - 1 - k), so the matched n satisfies
-    n - 1 - k = k_y k_x / mean(null). Bartlett's (1938) approximation,
-    (n - 1 - k - (k_y + k_x + 1) / 2)(-ln Lambda) ~ chi^2(k_y k_x), then gives
-    the mean of 1 - Lambda as 1 - exp(-k_y k_x / (n - 1 - k - (k_y + k_x + 1) / 2)),
-    in which k cancels (docs/methods.md, Effective sample size). 1 when the null is too wide for the
-    approximation (no samples left), 0 when the null is degenerate at zero."""
+    One feature each (k_y = k_x = 1): the statistic and the effect size are
+    both the squared partial correlation, whose null mean for n independent
+    samples is exactly 1 / (n - 1 - k). The matched n satisfies
+    n - 1 - k = 1 / mean(null), so the chance level is the mean of the draws
+    itself (docs/methods.md, Effective sample size), at most 1.
+
+    Several features: the statistic is Pillai's trace, whose null mean is
+    k_y k_x / (n - 1 - k), and the effect size is 1 - Wilks' lambda, whose
+    draws are not available. Bartlett's (1938) approximation,
+    (n - 1 - k - (k_y + k_x + 1) / 2)(-ln Lambda) ~ chi^2(k_y k_x), gives its
+    mean as 1 - exp(-k_y k_x / (n - 1 - k - (k_y + k_x + 1) / 2)), in which k
+    cancels (docs/methods.md, Several features); 1 when the null is
+    too wide for the approximation (no samples left).
+    Both are 0 when the null is degenerate at zero."""
     mean = float(np.mean(null_draws)) if np.size(null_draws) else 0.0
     if not np.isfinite(mean) or mean <= 0.0:
         return 0.0
+    if k_y * k_x == 1:
+        return min(mean, 1.0)
     u = float(k_y * k_x)
     remaining = u / mean - (k_y + k_x + 1) / 2.0
     if remaining <= 0.0:
@@ -353,10 +363,11 @@ class LinearResidualTest(ConditionalIndependenceTest):
 
     def magnitude(self, candidate, obs, conditioning, time_positions, dependence_lag, observed, null_draws,
                   grid_step=None, period_starts=None):
-        """1 - Wilks' lambda of the residuals, less its chance level for the
-        number of independent samples whose null matches the candidate's own
-        null draws of Pillai's trace (chance_level). The null draws are not
-        values of 1 - Wilks' lambda, so their mean is not its chance level."""
+        """1 - Wilks' lambda of the residuals (the squared partial correlation
+        for one feature each), less its chance level (chance_level): for one
+        feature the mean of the candidate's own null draws; for several, the
+        null mean of 1 - Wilks' lambda for the number of independent samples
+        whose null mean of Pillai's trace matches those draws."""
         z = augmented_conditioning(candidate, obs, conditioning)
         _, resid_o = ols_fit(obs, z)
         _, resid_c = ols_fit(as2d(candidate), z)

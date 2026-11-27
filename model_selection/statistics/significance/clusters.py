@@ -1,6 +1,6 @@
 """
 How the tests use clusters of dependent samples (docs/methods.md,
-Dependence between samples; Appendix C, High-flow event samples).
+Dependence between high-flow events; High-flow event samples).
 
 Every resampling component takes samples' time positions and a dependence
 lag, and treats samples less than one lag apart as dependent and samples at

@@ -1,7 +1,8 @@
 """
-The model-evaluation pipeline: a pooled pathway (one sample per timestep)
-and a high-flow event pathway (one sample per consensus event), orchestrated per
-basin by run_basin.
+The model-evaluation pipeline: the pooled pathway (one sample per timestep),
+optionally censored at high flow, orchestrated per basin by run_basin, which
+can also run the experimental high-flow event pathway
+(model_selection.experimental).
 """
 import logging
 
@@ -15,7 +16,6 @@ logging.basicConfig(
 )
 
 from model_selection.pipeline.config import OutputConfig  # noqa: E402
-from model_selection.pipeline.high_flow import FPCAConfig, run_high_flow_analysis  # noqa: E402
 from model_selection.pipeline.orchestration import run_basin  # noqa: E402
 from model_selection.pipeline.pooled import run_pooled_analysis  # noqa: E402
 from model_selection.preprocessing.seasonal import SeasonalConfig  # noqa: E402
@@ -31,7 +31,7 @@ from model_selection.pipeline.results import (  # noqa: E402
 
 __all__ = [
     "SeasonalConfig",
-    "OutputConfig", "FPCAConfig", "run_high_flow_analysis", "run_basin", "run_pooled_analysis",
+    "OutputConfig", "run_basin", "run_pooled_analysis",
     "BasinResult", "HighFlowResult", "PooledResult",
     "basin_result_to_dict", "high_flow_result_to_dict", "pooled_result_to_dict", "outcome_line",
 ]

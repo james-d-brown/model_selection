@@ -1,14 +1,18 @@
-"""Result types of both pathways and their JSON-ready dictionaries."""
+"""Result types of the pathways (the pooled pathway, and the experimental
+high-flow event pathway) and their JSON-ready dictionaries."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from model_selection.io.basin import OBS_KEY
-from model_selection.event_detection.windows import ExpandedEvent
 from model_selection.selection.greedy import STEP_OUTCOMES, SelectionResult
 from model_selection.statistics.significance.block_length import (
     MIN_ACF_N, MIN_BLOCKS, SHORTFALL_TOLERANCE,
 )
+
+if TYPE_CHECKING:
+    from model_selection.experimental.event_detection.windows import ExpandedEvent
 
 POOLED_RESULT_JSON_FILENAME_TEMPLATE = "{gage}_pooled_result.json"
 POOLED_CENSORED_RESULT_JSON_FILENAME_TEMPLATE = "{gage}_pooled_censored_result.json"
@@ -52,7 +56,7 @@ class PooledResult:
 
 @dataclass
 class HighFlowResult:
-    """Outcome of the high-flow event pathway (one sample per event).
+    """Outcome of the experimental high-flow event pathway (one sample per event).
 
     selection is None when there were too few usable events. n_components
     is the fitted component count. requires_closer_inspection is set when
@@ -74,7 +78,7 @@ class HighFlowResult:
     """Which events the tests treated as dependent: the rule, and for
     clusters their number and sizes, the gaps between consecutive clusters
     and, for clustering of arrivals, the run length (docs/methods.md,
-    Dependence between samples)."""
+    Dependence between high-flow events)."""
     missing_values: dict | None = None
     seasonal_conditioning: dict | None = None
     pot_ratio: float = 2.0 / 3.0
@@ -274,7 +278,7 @@ def review_flags(result: "PooledResult | HighFlowResult") -> list[dict]:
         (docs/methods.md, Backward pass).
     event_terms_correlated : in a step on high-flow events in clusters,
         the terms of the statistic were correlated between consecutive
-        clusters (docs/methods.md, Dependence between samples).
+        clusters (docs/methods.md, Dependence between high-flow events).
 
     The resampling flags (few_blocks, crossfit_blocks_short,
     dependent_samples_permuted, dependence_not_decaying) are raised for every
@@ -594,6 +598,6 @@ def outcome_line(pooled: "PooledResult | None" = None, high_flow: "HighFlowResul
             for name in (res.selection.selected if res.selection is not None else []):
                 if name not in union:
                     union.append(name)
-        together = "both pathways" if len(runs) == 2 else "all runs"
+        together = "both runs" if len(runs) == 2 else "all runs"
         line += f" | {together}: {{{', '.join(union)}}}"
     return line

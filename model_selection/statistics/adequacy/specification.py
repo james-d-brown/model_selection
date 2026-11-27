@@ -59,7 +59,8 @@ from model_selection.statistics.adequacy.kernels import (
 from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights, fixed_b_draws
 from model_selection.statistics.significance.clusters import cluster_scaled_residuals, smallest_p_value
 from model_selection.statistics.regression.kernel_residuals import _median_bandwidth, _rbf_column, standardize
-from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
+from model_selection.statistics.significance.base import (
+    bias_correct_association, draw_until_decided, permutation_p_value, resamples_at_level, sequential_decision)
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH, resolve_block
 from model_selection.statistics.significance.resampling import grid_subsample
 from model_selection.utils import as2d
@@ -107,6 +108,7 @@ def linear_specification_test(
         max_n: int = 2000,
         interaction_with: np.ndarray | None = None,
         extra_regressors: np.ndarray | None = None,
+        resampling_risk: float | None = None,
 ) -> AdequacyTestOutcome:
     """Test every column of `columns` for nonlinear dependence on the
     conditioning set.
@@ -138,6 +140,10 @@ def linear_specification_test(
         series' fit-then-censor means (conditional_independence.linear.
         censored_mean_columns), so that the test asks whether the residuals of
         the linear tier's own regressions still depend on the conditioning set.
+    resampling_risk : when given, each part made at a level below alpha
+        (alpha divided among the parts and columns) draws sequentially until
+        its decision at that level is settled, as the escalation tests do
+        (FunctionalFormTest.run; docs/methods.md, Resamples per test).
     """
     Y = as2d(np.asarray(columns, dtype=float))
     Z = as2d(np.asarray(conditioning, dtype=float))
@@ -179,6 +185,8 @@ def linear_specification_test(
     from model_selection.parallel import run_tasks
     kernels = [(part, sp) for (part, _), sp in zip(spectra, run_tasks([f for _, f in spectra]))]
     blocks = []
+    n_drawn: list[int] = []
+    settled_parts: list[bool] = []
 
     def column_outcomes(spectrum, levels):
         eigvals, V, _ = spectrum
@@ -193,8 +201,6 @@ def linear_specification_test(
             K_resid = V @ (eigvals * P[:, 0])
             resolved = resolve_block(time_positions, min_temporal_lag, [(resid, K_resid)], run_length, grid_step)
             blocks.append(resolved)
-            null_stats = np.empty(n_permutations)
-            null_semi = np.empty(n_permutations)
             units = resolved.independent_units
             if units:
                 # Independent units (clusters of events): one Rademacher sign each,
@@ -205,24 +211,48 @@ def linear_specification_test(
             else:
                 independent, total = "gaussian", float(resid @ resid)
                 scaled = resid * hc2
-            for start in range(0, n_permutations, DRAW_CHUNK):
-                stop = min(start + DRAW_CHUNK, n_permutations)
-                W = dependent_wild_weights(time_positions, resolved.length, stop - start, rng, independent=independent)
-                R = (W * scaled[None, :]).T
-                R = R - Q @ (Q.T @ R)
-                null_stats[start:stop], null_semi[start:stop] = _kernel_scores(R, eigvals, V, lam, total=total)
-            # The fixed-b reference distribution on a regular grid; the semipartial
-            # draws, used only for their mean, divided by the functional's mean (base module).
-            q = fixed_b_draws(resolved.bandwidth_fraction, n_permutations, rng, n_steps=resolved.grid_length)
-            null_stats /= q
-            null_semi /= float(np.mean(q))
+
+            def referenced_draws(count, scaled=scaled, independent=independent, total=total, resolved=resolved,
+                                 eigvals=eigvals, V=V, lam=lam):
+                stats_b, semis_b = np.empty(count), np.empty(count)
+                for start in range(0, count, DRAW_CHUNK):
+                    stop = min(start + DRAW_CHUNK, count)
+                    W = dependent_wild_weights(time_positions, resolved.length, stop - start, rng,
+                                               independent=independent)
+                    R = (W * scaled[None, :]).T
+                    R = R - Q @ (Q.T @ R)
+                    stats_b[start:stop], semis_b[start:stop] = _kernel_scores(R, eigvals, V, lam, total=total)
+                # The fixed-b reference distribution on a regular grid; the semipartial
+                # draws, used only for their mean, divided by the functional's mean (base module).
+                q_b = fixed_b_draws(resolved.bandwidth_fraction, count, rng, n_steps=resolved.grid_length)
+                return stats_b / q_b, semis_b, q_b
+
+            null_stats, null_semi, q = referenced_draws(n_permutations)
+            # A part made at a level below alpha draws on until its decision at that
+            # level is settled (significance.base.draw_until_decided;
+            # docs/methods.md, Resamples per test).
+            sequential = resampling_risk is not None and level < alpha
+            settled = None
+            if sequential:
+                (null_stats, null_semi, q), settled = draw_until_decided(
+                    observed, (null_stats, null_semi, q), referenced_draws, level, resampling_risk,
+                    resamples_at_level(alpha, n_permutations, level), DRAW_CHUNK)
+            null_semi = null_semi / float(np.mean(q))
+            n_drawn.append(null_stats.shape[0])
             p = permutation_p_value(observed, null_stats)
+            if sequential and settled:
+                below = bool(sequential_decision(int(np.sum(null_stats >= observed)), null_stats.shape[0], level,
+                                                 resampling_risk))
+            else:
+                below = bool(p < level)
             corrected, _ = bias_correct_association(semipartial, null_semi)
             # Too few independent units to reject at this level (significance.clusters): untestable.
             untestable = bool(units and resolved.n_blocks is not None
                               and smallest_p_value(int(resolved.n_blocks)) >= level)
-            found.append((p < level and corrected >= effect_size_floor and not untestable, p, j, semipartial,
+            found.append((below and corrected >= effect_size_floor and not untestable, p, j, semipartial,
                           corrected))
+            if sequential:
+                settled_parts.append(bool(settled))
         return found
 
     # Each side at alpha (intersection-union; module docstring), divided among the side's columns and the kernel
@@ -273,6 +303,7 @@ def linear_specification_test(
         tier_adequate=not rejected, decision_reason=reason, p_value=p,
         semipartial_effect_size=semipartial, bias_corrected_semipartial_effect_size=corrected,
         block_length=max(b.length for b in blocks),
+        n_draws=max(n_drawn), settled=(all(settled_parts) if settled_parts else None),
         dependence={
             "block_length": max(b.length for b in blocks), "estimated": blocks[0].estimated,
             "decorrelation_lag": (max(b.decorrelation_lag for b in blocks) if blocks[0].estimated else None),

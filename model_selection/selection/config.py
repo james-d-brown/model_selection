@@ -185,6 +185,14 @@ class AdequacyConfig:
         the threshold is at most monte_carlo_relative_error times alpha
         (1,900 at alpha = 0.05). A warning is issued below 10 / alpha.
     monte_carlo_relative_error : see n_permutations.
+    resampling_risk : the largest chance, for a test made at a level below
+        alpha (the escalation family's Bonferroni level), that its decision
+        from the resamples differs from the decision from the exact p-value
+        (Gandy, 2009). Such a test draws n_permutations resamples and then
+        more, until the confidence-sequence method (Ding, Gandy and Hahn,
+        2020) settles its decision, up to the resamples that give the same
+        relative error at its level. 10^-3 (default) is a convention. See
+        docs/methods.md, Resamples per test.
     ridge_lambda : kernel ridge penalty of the kernel adequacy tests; None
         estimates it by REML.
     kernel_check_max_n : no longer used: the two kernel-based escalation
@@ -196,11 +204,14 @@ class AdequacyConfig:
     effect_size_floor: float | None = None
     n_permutations: int | None = None
     monte_carlo_relative_error: float = 0.1
+    resampling_risk: float = 1e-3
     ridge_lambda: float | None = None
     kernel_check_max_n: int | None = None
 
     def __post_init__(self):
         _warn_if_coarse(self.resolved_n_permutations, self.alpha, "AdequacyConfig")
+        if not 0.0 < self.resampling_risk < 1.0:
+            raise ValueError(f"AdequacyConfig.resampling_risk must lie in (0, 1) -- got {self.resampling_risk}")
         if self.kernel_check_max_n is not None:
             warnings.warn("AdequacyConfig.kernel_check_max_n is no longer used: the kernel-based escalation tests "
                           "share SelectionConfig.nonlinear_max_n.", DeprecationWarning, stacklevel=3)

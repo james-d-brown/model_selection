@@ -56,7 +56,8 @@ from typing import Callable
 import numpy as np
 from scipy import stats
 
-from model_selection.statistics.significance.base import bias_correct_association, permutation_p_value
+from model_selection.statistics.significance.base import (
+    bias_correct_association, draw_until_decided, permutation_p_value, resamples_at_level, sequential_decision)
 from model_selection.statistics.significance.block_length import DEFAULT_RUN_LENGTH, resolve_block
 from model_selection.statistics.conditional_independence.multipliers import dependent_wild_weights, fixed_b_draws
 from model_selection.statistics.significance.clusters import cluster_scaled_residuals, smallest_p_value
@@ -81,6 +82,14 @@ class AdequacyTestOutcome:
     bias_corrected_semipartial_effect_size: float | None = None
     block_length: int | None = None
     dependence: dict | None = None
+    n_draws: int | None = None
+    level: float | None = None
+    settled: bool | None = None
+    """n_draws: null draws used. level: the level the test decided at when
+    it was below alpha (tier_adequate is then the decision at that level),
+    else None. settled: for such a test, whether the sequential test settled
+    the decision before the most resamples (False: decided by the p-value
+    from all of them); None otherwise."""
 
 
 AdequacyTestFunc = Callable[
@@ -89,7 +98,10 @@ AdequacyTestFunc = Callable[
     AdequacyTestOutcome,
 ]
 """adequacy_test(candidate, obs, conditioning, n_permutations=..., rng=...,
-time_positions=..., min_temporal_lag=...) -> AdequacyTestOutcome"""
+time_positions=..., min_temporal_lag=..., level=None, resampling_risk=None) -> AdequacyTestOutcome
+
+level, resampling_risk : for a test made at a level below alpha, the level
+and the sequential test's resampling risk (FunctionalFormTest.run)."""
 
 AdequacyPlotFunc = Callable[..., "str | None"]
 """adequacy_plot(candidate, obs, conditioning, round_label, context=None) -> written path or None.
@@ -103,7 +115,8 @@ class FunctionalFormTestResult:
 
     classical_p_value is the i.i.d.-theory reference (NaN where none is
     implemented) and is reported for comparison only. permutation_p_value is
-    the decision p-value, (M + 1) / (N + 1). reject_linearity is the final decision: significant AND
+    the decision p-value, (M + 1) / (N + 1), over the n_permutations draws
+    used. level and settled: as in AdequacyTestOutcome. reject_linearity is the final decision: significant AND
     meets_effect_size_floor (the name is historical; it applies to every
     subclass). effect_size is the partial R^2; semipartial_effect_size is the
     decision-relevant semipartial R^2, compared against effect_size_floor
@@ -138,6 +151,8 @@ class FunctionalFormTestResult:
     null_p90: float = 0.0
     null_p99: float = 0.0
     null_max: float = 0.0
+    level: float | None = None
+    settled: bool | None = None
 
 
 class FunctionalFormTest(ABC):
@@ -244,9 +259,20 @@ class FunctionalFormTest(ABC):
             n_permutations: int = 500,
             rng: np.random.Generator | None = None,
             grid_step: float | None = None,
+            level: float | None = None,
+            resampling_risk: float | None = None,
     ) -> FunctionalFormTestResult:
         """Test one fully specified state. conditioning may be None or (n, k);
-        grid_step as in ConditionalIndependenceTest."""
+        grid_step as in ConditionalIndependenceTest.
+
+        level, resampling_risk : for a test made at a level below alpha (the
+        escalation family's Bonferroni level), the level and the resampling
+        risk of the sequential test that decides at it: n_permutations draws
+        first, then further draws until the decision is settled, up to the
+        draws that give at the level the relative Monte Carlo error that
+        n_permutations gives at alpha (significance.base.draw_until_decided;
+        docs/methods.md, Resamples per test). Omitted, or at alpha or above,
+        the test draws n_permutations and decides at alpha."""
         rng = rng or np.random.default_rng()
         candidate = np.asarray(candidate, dtype=np.float64)
         obs = np.asarray(obs, dtype=np.float64)
@@ -303,31 +329,50 @@ class FunctionalFormTest(ABC):
         # (module docstring).
         independent = "rademacher" if units else self.independent_multipliers
         parts = None if units else self._statistic_parts(candidate, obs, conditioning)
-        null_stats = np.empty(n_permutations)
-        null_semipartial_effect_sizes = np.empty(n_permutations)
-        for start in range(0, n_permutations, DRAW_CHUNK):
-            stop = min(start + DRAW_CHUNK, n_permutations)
-            weights = dependent_wild_weights(time_positions, block, stop - start, rng, independent=independent)
-            for b, w in zip(range(start, stop), weights):
-                obs_b = fitted_null + scaled * (w if scaled.ndim == 1 else w[:, None])
-                if parts is None:
-                    stat_b, _, _, _, semipartial_b = self._compute_statistic(candidate, obs_b, conditioning)
-                else:
-                    # The draw's numerators over the observed denominators.
-                    num_b, _, semi_num_b, _ = self._statistic_parts(candidate, obs_b, conditioning)
-                    stat_b = num_b / parts[1] if parts[1] > 0 else 0.0
-                    semipartial_b = semi_num_b / parts[3] if parts[3] > 0 else 0.0
-                null_stats[b] = stat_b
-                null_semipartial_effect_sizes[b] = semipartial_b if semipartial_b is not None else 0.0
+
+        def bootstrap_draws(count: int) -> tuple[np.ndarray, np.ndarray]:
+            """`count` null draws of the statistic and of the semipartial effect."""
+            stats_b = np.empty(count)
+            semis_b = np.empty(count)
+            for start in range(0, count, DRAW_CHUNK):
+                stop = min(start + DRAW_CHUNK, count)
+                weights = dependent_wild_weights(time_positions, block, stop - start, rng, independent=independent)
+                for b, w in zip(range(start, stop), weights):
+                    obs_b = fitted_null + scaled * (w if scaled.ndim == 1 else w[:, None])
+                    if parts is None:
+                        stat_b, _, _, _, semipartial_b = self._compute_statistic(candidate, obs_b, conditioning)
+                    else:
+                        # The draw's numerators over the observed denominators.
+                        num_b, _, semi_num_b, _ = self._statistic_parts(candidate, obs_b, conditioning)
+                        stat_b = num_b / parts[1] if parts[1] > 0 else 0.0
+                        semipartial_b = semi_num_b / parts[3] if parts[3] > 0 else 0.0
+                    stats_b[b] = stat_b
+                    semis_b[b] = semipartial_b if semipartial_b is not None else 0.0
+            return stats_b, semis_b
+
         # The fixed-b reference distribution (multipliers.fixed_b_draws), as in
         # the tiers' tests: each draw divided by a draw of the variance
         # functional; ones off a regular grid. The semipartial draws serve only
         # the chance level of the observed effect, their mean, so they are
         # divided by the functional's mean, which corrects the bandwidth's
         # downward bias in the multipliers' variance (statistics.power).
-        q = fixed_b_draws(resolved.bandwidth_fraction, n_permutations, rng, n_steps=resolved.grid_length)
-        null_stats /= q
-        null_semipartial_effect_sizes /= float(np.mean(q))
+        def referenced_draws(count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            stats_b, semis_b = bootstrap_draws(count)
+            q_b = fixed_b_draws(resolved.bandwidth_fraction, count, rng, n_steps=resolved.grid_length)
+            return stats_b / q_b, semis_b, q_b
+
+        null_stats, null_semipartial_effect_sizes, q = referenced_draws(n_permutations)
+        # A test made at a level below alpha (the escalation family's Bonferroni
+        # level) draws on until its decision at that level is settled
+        # (significance.base.draw_until_decided; docs/methods.md, Resamples per test).
+        sequential = level is not None and resampling_risk is not None and level < self.alpha
+        settled = None
+        if sequential:
+            (null_stats, null_semipartial_effect_sizes, q), settled = draw_until_decided(
+                observed_stat, (null_stats, null_semipartial_effect_sizes, q), referenced_draws, level,
+                resampling_risk, resamples_at_level(self.alpha, n_permutations, level), DRAW_CHUNK)
+        null_semipartial_effect_sizes = null_semipartial_effect_sizes / float(np.mean(q))
+        n_drawn = null_stats.shape[0]
 
         p_used = permutation_p_value(observed_stat, null_stats)
         # Too few independent units for any test of this kind to reject at alpha
@@ -335,7 +380,13 @@ class FunctionalFormTest(ABC):
         # residuals' scaling, and the check is untestable, not significant.
         untestable = bool(units and resolved.n_blocks is not None
                           and smallest_p_value(int(resolved.n_blocks)) >= self.alpha)
-        significant = bool(p_used < self.alpha) and not untestable
+        threshold = level if sequential else self.alpha
+        if sequential and settled:
+            below = bool(sequential_decision(int(np.sum(null_stats >= observed_stat)), n_drawn, level,
+                                             resampling_risk))
+        else:
+            below = bool(p_used < threshold)
+        significant = below and not untestable
 
         if semipartial_effect_size is not None and self.effect_size_floor is not None:
             bias_corrected_semipartial, null_semipartial_effect_size_mean = bias_correct_association(
@@ -352,7 +403,8 @@ class FunctionalFormTest(ABC):
             decision_reason = (f"not rejected: untestable, {resolved.n_blocks:.0f} independent clusters cannot give a "
                                f"p-value below alpha={self.alpha:.4g} (p={p_used:.4g} not used)")
         elif not significant:
-            decision_reason = f"not rejected: p={p_used:.4g} >= alpha={self.alpha:.4g}"
+            label = "level" if sequential else "alpha"
+            decision_reason = f"not rejected: p={p_used:.4g} >= {label}={threshold:.4g}"
         elif not meets_floor:
             decision_reason = (
                 f"not rejected: statistically significant (p={p_used:.4g}) but "
@@ -370,6 +422,11 @@ class FunctionalFormTest(ABC):
                 if semipartial_effect_size is not None else "no effect-size floor applied"
             )
             decision_reason = f"rejected: significant (p={p_used:.4g}) and {floor_note}"
+        if sequential:
+            decision_reason += (f" [{n_drawn} resamples, tested at level {level:.4g}; "
+                                + ("decision settled by the sequential test]" if settled else
+                                   "the most resamples drawn without settling the decision: decided by the p-value "
+                                   "from all of them]"))
 
         return FunctionalFormTestResult(
             test_name=self.name,
@@ -378,8 +435,10 @@ class FunctionalFormTest(ABC):
             df_denominator=df_den,
             classical_p_value=classical_p,
             permutation_p_value=p_used,
-            n_permutations=n_permutations,
+            n_permutations=n_drawn,
             alpha=self.alpha,
+            level=level if sequential else None,
+            settled=settled,
             reject_linearity=reject,
             significant=significant,
             effect_size=effect_size,
@@ -413,11 +472,14 @@ def as_adequacy_test(test: FunctionalFormTest) -> AdequacyTestFunc:
             time_positions: np.ndarray | None = None,
             min_temporal_lag: int = 0,
             grid_step: float | None = None,
+            level: float | None = None,
+            resampling_risk: float | None = None,
     ) -> AdequacyTestOutcome:
         result = test.run(
             candidate, obs, conditioning,
             time_positions=time_positions, min_temporal_lag=min_temporal_lag,
             n_permutations=n_permutations, rng=rng, grid_step=grid_step,
+            level=level, resampling_risk=resampling_risk,
         )
         return AdequacyTestOutcome(
             tier_adequate=not result.reject_linearity,
@@ -428,6 +490,9 @@ def as_adequacy_test(test: FunctionalFormTest) -> AdequacyTestFunc:
             bias_corrected_semipartial_effect_size=result.bias_corrected_semipartial_effect_size,
             block_length=result.block_length,
             dependence=result.dependence,
+            n_draws=result.n_permutations,
+            level=result.level,
+            settled=result.settled,
         )
 
     return _adequacy

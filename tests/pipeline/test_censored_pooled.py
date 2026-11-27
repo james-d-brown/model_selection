@@ -87,7 +87,7 @@ def test_censored_run_reports_its_censoring_and_writes_its_own_result_file(tmp_p
         assert json.load(f)["censoring"] is None
     line = outcome_line(pooled=plain, pooled_censored=censored)
     assert "pooled {" in line and "pooled, censored {" in line and "all runs" not in line
-    assert "both pathways" in line                                       # two runs
+    assert "both runs" in line                                           # two runs
     assert outcome_line(pooled=censored).startswith(f"{basin.gage}: pooled, censored")
     with pytest.raises(ValueError, match="censoring"):
         outcome_line(pooled_censored=plain)

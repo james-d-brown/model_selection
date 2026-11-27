@@ -316,6 +316,8 @@ class StateIndependenceTest(FunctionalFormTest):
             n_permutations: int = 500,
             rng: np.random.Generator | None = None,
             grid_step: float | None = None,
+            level: float | None = None,
+            resampling_risk: float | None = None,
     ) -> FunctionalFormTestResult:
         """Same contract as FunctionalFormTest.run, except that when n > max_n one
         evenly spaced subsample of max_n points is drawn first (the bootstrap
@@ -358,6 +360,7 @@ class StateIndependenceTest(FunctionalFormTest):
                 candidate, obs, conditioning,
                 time_positions=time_positions, min_temporal_lag=block_min_temporal_lag,
                 n_permutations=n_permutations, rng=rng, grid_step=grid_step,
+                level=level, resampling_risk=resampling_risk,
             )
         finally:
             self._run_state().__dict__.pop("spectra_cache", None)

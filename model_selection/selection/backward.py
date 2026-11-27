@@ -61,7 +61,9 @@ def _validity_departure(ctx, name: str, z, rng: np.random.Generator) -> list[dic
     for check in ctx.tier.adequacy_checks:
         if check.stage != "removal":
             continue
-        extra = {} if partialled is None else {"interaction_with": partialled}
+        extra = {"resampling_risk": ctx.tier.adequacy_resampling_risk}
+        if partialled is not None:
+            extra["interaction_with"] = partialled
         outcome = check.test(ctx.candidates[name], ctx.obs, z, n_permutations=ctx.tier.adequacy_n_permutations,
                              rng=rng, time_positions=ctx.time_positions, min_temporal_lag=ctx.lag,
                              grid_step=ctx.grid_step, **extra)

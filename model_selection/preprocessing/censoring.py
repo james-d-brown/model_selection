@@ -12,8 +12,8 @@ function of the observations are conditionally independent whenever the
 candidate and the observations are (Dawid, 1979), so censoring them keeps
 the null hypothesis.
 
-Censoring : the configuration, one quantile shared with the high-flow
-    events (EventConfig.high_flow_quantile).
+Censoring : the configuration, one quantile, by default the one the
+    experimental high-flow events use (EventConfig.high_flow_quantile).
 CensoredSeries : what a censored sample carries besides the censored
     values: each series' uncensored values and its threshold, so that a
     subsample of the rows can be censored again, with its records.
@@ -33,8 +33,8 @@ import numpy as np
 
 from model_selection.utils import as2d
 
-# High flow relative to each series: shared by the high-flow events
-# (EventConfig.high_flow_quantile) and censoring at high flow.
+# High flow relative to each series: shared by censoring at high flow and the
+# experimental high-flow events (EventConfig.high_flow_quantile).
 DEFAULT_HIGH_FLOW_QUANTILE = 0.90
 
 
@@ -43,9 +43,9 @@ class Censoring:
     """Censoring of the candidate and the observations at a quantile of
     each series' own record; the selected formulations are not censored.
 
-    quantile : in (0, 1); the high-flow quantile of the high-flow events
-        by default, so one setting defines high flow in both
-        (Censoring.at_high_flow(events) uses an EventConfig's).
+    quantile : in (0, 1); by default the high-flow quantile of the
+        experimental high-flow events, so one setting defines high flow in
+        both (Censoring.at_high_flow(events) uses an EventConfig's).
     """
     quantile: float = DEFAULT_HIGH_FLOW_QUANTILE
 

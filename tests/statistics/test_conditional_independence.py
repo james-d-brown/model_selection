@@ -442,6 +442,24 @@ def test_the_linear_statistic_is_pillais_trace_and_the_effect_is_pc_less_its_cha
     assert r1.observed[0] == pytest.approx(np.corrcoef(rc, ro)[0, 1] ** 2)
 
 
+def test_for_one_feature_the_chance_level_is_the_mean_of_the_null_draws():
+    """The squared partial correlation of independent normal samples has null
+    mean exactly 1 / (n - 1 - k), so for one feature each the chance level is
+    the mean of the draws, without an approximation."""
+    from model_selection.statistics.conditional_independence.linear import chance_level
+    rng = np.random.default_rng(23)
+    n, k = 40, 2
+    r2 = []
+    for _ in range(4000):
+        z = np.column_stack([np.ones(n), rng.normal(size=(n, k))])
+        resid = lambda y: y - z @ np.linalg.lstsq(z, y, rcond=None)[0]
+        r2.append(np.corrcoef(resid(rng.normal(size=n)), resid(rng.normal(size=n)))[0, 1] ** 2)
+    assert np.mean(r2) == pytest.approx(1 / (n - 1 - k), rel=0.05)
+    draws = np.array([0.01, 0.03, 0.02])
+    assert chance_level(draws, 1, 1) == pytest.approx(0.02)
+    assert chance_level(np.zeros(5), 1, 1) == 0.0 and chance_level(np.full(5, 3.0), 1, 1) == 1.0
+
+
 def test_the_chance_level_matches_the_null_mean_of_one_minus_wilks_lambda():
     """For independent normal samples the chance level from the null mean of
     Pillai's trace is the mean of 1 - Wilks' lambda (Bartlett's

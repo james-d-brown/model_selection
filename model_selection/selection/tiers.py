@@ -210,6 +210,7 @@ class Tier:
     adequacy_n_permutations: int = 200
     adequacy_alpha: float = 0.05
     adequacy_floor: float = 0.02
+    adequacy_resampling_risk: float | None = None
     structural_check: StructuralCheckFunc | None = None
     sample: SelectionSample | None = None
     diagnostic_plots: list[AdequacyPlotFunc] = field(default_factory=list)
@@ -243,7 +244,8 @@ def _effect_modification_check(a: AdequacyConfig, floor: float, run_length: int,
 
 def _specification_check(a: AdequacyConfig, floor: float, run_length: int, max_n: int) -> AdequacyTestFunc:
     def _check(candidate, obs, conditioning, n_permutations=100, rng=None, time_positions=None,
-               min_temporal_lag=0, column_labels=None, grid_step=None, interaction_with=None):
+               min_temporal_lag=0, column_labels=None, grid_step=None, interaction_with=None,
+               resampling_risk=None):
         from model_selection.statistics.conditional_independence.linear import censored_mean_columns
         extra = censored_mean_columns(candidate, obs, conditioning)
         columns = np.column_stack([as2d(candidate), as2d(obs)])
@@ -252,7 +254,7 @@ def _specification_check(a: AdequacyConfig, floor: float, run_length: int, max_n
             rng or np.random.default_rng(), time_positions if time_positions is not None else np.arange(len(columns)),
             min_temporal_lag, column_labels=column_labels, run_length=run_length, grid_step=grid_step,
             n_candidate_columns=as2d(candidate).shape[1], max_n=max_n,
-            interaction_with=interaction_with, extra_regressors=extra,
+            interaction_with=interaction_with, extra_regressors=extra, resampling_risk=resampling_risk,
         )
     return _check
 
@@ -340,6 +342,7 @@ def build_tier(
         tier.adequacy_n_permutations = a.resolved_n_permutations
         tier.adequacy_alpha = a.alpha
         tier.adequacy_floor = adequacy_floor
+        tier.adequacy_resampling_risk = a.resampling_risk
     return tier
 
 

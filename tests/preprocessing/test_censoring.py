@@ -3,7 +3,7 @@ sample carries (docs/methods.md, Censoring at high flow)."""
 import numpy as np
 import pytest
 
-from model_selection.event_detection import EventConfig
+from model_selection.experimental.event_detection import EventConfig
 from model_selection.preprocessing import CensoredSeries, Censoring
 from model_selection.preprocessing.censoring import DEFAULT_HIGH_FLOW_QUANTILE
 from model_selection.preprocessing.transforms import prepare_series
